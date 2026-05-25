@@ -7,6 +7,6 @@ defaults:
   max_depth: 7
   n_generate_sample: 5
 sweeps:
-  iteration_limit: [4, 8, 16, 32]   # 64 omitted — too slow on M3 Pro Q4
+  iteration_limit: [4, 8, 16]   # 32+ omitted — even with iter*80s timeout, 32 needs ~2500s/q on M3 Pro Q4
 samples_per_cell: 10                 # LATS is very heavy; keep tight
 sample_seed: 42

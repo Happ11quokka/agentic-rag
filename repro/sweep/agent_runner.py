@@ -82,8 +82,12 @@ _FORCE_RESTART_THRESHOLD = 3
 
 
 def _default_timeout(agent_type: str, iteration_limit: int) -> float:
-    if agent_type == "lats" and iteration_limit >= 50:
-        return 1200.0
+    # LATS on M3 Pro Q4 needs ~18s/LLM call. Each LATS iteration triggers
+    # ~3-5 LLM calls (expansion + evaluation + children).
+    # Empirical: default 600s only finished ~33 of paper's 71 calls/query.
+    # Budget formula: max(600, iteration_limit * 80) gives ~80s per LATS iter.
+    if agent_type == "lats":
+        return max(600.0, iteration_limit * 80.0)
     return 600.0
 
 
