@@ -61,6 +61,12 @@ class QueryTrace(BaseModel):
     tokens_output_total: int
     tokens_input_max: int
 
+    # Token breakdown by message role (Fig 8). Approximate; populated via
+    # on_chat_model_start when LangChain provides BaseMessage objects, with
+    # fallback to parsing serialized prompt strings. Keys: "system" | "human" |
+    # "ai" | "tool".
+    tokens_by_role: dict[str, int] = Field(default_factory=dict)
+
     # Memory / KV cache
     kv_cache_max_tokens: int
     kv_cache_mean_tokens: float
