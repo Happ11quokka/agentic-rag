@@ -44,3 +44,19 @@ def extract_final_answer(agent_type: str, result: dict) -> str:
         if m:
             return m.group(1).strip()
     return answer
+
+
+def load_sample(*, workload: str, idx: int) -> dict:
+    """Load one HotpotQA sample via AgentBench's patched load_dataset.
+
+    AgentBench's load_dataset uses a relative path (dataset/...) so we chdir
+    to AGENTBENCH_PATH for the duration of the call.
+    """
+    from src.utils import load_dataset
+    prev_cwd = os.getcwd()
+    try:
+        os.chdir(AGENTBENCH_PATH)
+        data = load_dataset(workload, shuffle=False)
+    finally:
+        os.chdir(prev_cwd)
+    return data[idx]
