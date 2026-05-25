@@ -1,0 +1,389 @@
+diff --git a/run_lats.py b/run_lats.py
+index e6a5493..1db701c 100644
+--- a/run_lats.py
++++ b/run_lats.py
+@@ -30,6 +30,78 @@ def _get_attr(args: Any, name: str, default: Any) -> Any:
+     return getattr(args, name, default)
+ 
+ 
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run LATS on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): in-context examples.
++            iteration_limit (int): MCTS iterations.
++            max_depth (int): tree max depth.
++            n_generate_sample (int): branching factor (children per expand).
++            sampling_temperature (float): node sampling temperature.
++            callbacks (list[BaseCallbackHandler] | None).
++            model (str), base_url (str | None), temperature (float),
++            print_log (bool).
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 0))
++    iteration_limit = int(agent_kwargs.get("iteration_limit", 30))
++    max_depth = int(agent_kwargs.get("max_depth", 7))
++    n_generate_sample = int(agent_kwargs.get("n_generate_sample", 5))
++    sampling_temperature = float(agent_kwargs.get("sampling_temperature", 1.0))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    base_url = agent_kwargs.get("base_url")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    client = OpenAIChatClient(
++        model=model_name,
++        base_url=base_url,
++        temperature=temperature,
++    )
++    # Inject max_tokens=2048, timeout=600, and callbacks into the underlying ChatOpenAI.
++    bind_kwargs: Dict[str, Any] = {"max_tokens": 2048, "timeout": 600}
++    bound = client.llm.bind(**bind_kwargs)
++    if callbacks:
++        bound = bound.with_config({"callbacks": callbacks})
++    client.llm = bound
++
++    env = HotpotWikiEnv()
++    task = HotpotQATask(client=client, fewshot=fewshot)
++    config = HotpotLATSConfig(
++        iterations=iteration_limit,
++        n_generate_sample=n_generate_sample,
++        max_depth=max_depth,
++        sampling_temperature=sampling_temperature,
++        print_log=print_log,
++    )
++    runner = HotpotLATSRunner(env=env, task=task, client=client, config=config)
++
++    question = sample["question"]
++    label = sample.get("answer", "")
++    result = runner.run(question=question, answer=label)
++
++    best_node = result.get("best_node")
++    try:
++        from measurement.chat_wrapper import TRACE
++        trace_obj = TRACE.get()
++        # Use depth as a proxy for expansions on the winning path; fall back to iteration_limit.
++        trace_obj.n_tree_expansions = int(getattr(best_node, "depth", iteration_limit) or iteration_limit)
++    except (LookupError, ImportError):
++        pass
++
++    return {
++        "answer": result.get("output", ""),
++        "raw_messages": [],
++        "iterations": int(getattr(best_node, "depth", 0) or 0),
++    }
++
++
+ def main(args: Any) -> None:
+     if args.workload not in ["hotpotqa", "webshop", "humaneval", "math"]:
+         raise NotImplementedError(
+diff --git a/run_llmcompiler.py b/run_llmcompiler.py
+index 1fc38c7..9dba824 100644
+--- a/run_llmcompiler.py
++++ b/run_llmcompiler.py
+@@ -103,6 +103,104 @@ async def run_agent(args, agent, question, label=None, evaluator=None):
+ 
+ 
+ 
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run LLMCompiler on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): in-context examples.
++            iteration_limit (int): unused (kept for uniformity).
++            max_replan (int): max plan/execute/join cycles.
++            max_chat_history (int): replan context window size.
++            callbacks (list[BaseCallbackHandler] | None).
++            model (str), host (str | None), port (int | None),
++            temperature (float), print_log (bool).
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    from src.agents.LLMCompiler.configs.hotpotqa.tools import tools as hotpot_tools, clear_pages
++    from src.agents.LLMCompiler.configs.hotpotqa.prompt import (
++        get_output_prompt,
++        get_planner_prompt,
++    )
++
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 1))
++    max_replan = int(agent_kwargs.get("max_replan", 10))
++    max_chat_history = int(agent_kwargs.get("max_chat_history", 10))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    host = agent_kwargs.get("host")
++    port = agent_kwargs.get("port")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    output_prompt = get_output_prompt(fewshot)
++    planner_prompt = get_planner_prompt(fewshot)
++
++    def _make_llm():
++        m = get_model(
++            model_name=model_name,
++            host=host,
++            port=port,
++            temperature=temperature,
++            max_tokens=2048,
++        )
++        bound = m.bind(timeout=600)
++        if callbacks:
++            bound = bound.with_config({"callbacks": callbacks})
++        return bound
++
++    llm = _make_llm()
++    planner_llm = _make_llm()
++
++    agent = LLMCompiler(
++        tools=hotpot_tools,
++        planner_llm=planner_llm,
++        planner_example_prompt=planner_prompt,
++        planner_example_prompt_replan=planner_prompt + "\nConsidering the previous plans and observations, please plan for the next steps.",
++        planner_stop=[END_OF_PLAN],
++        planner_stream=True,
++        agent_llm=llm,
++        joinner_prompt=output_prompt,
++        joinner_prompt_final=output_prompt + f"\nThis is the last trial, please think carefully and answer with {JOINNER_FINISH}(answer).",
++        max_replans=max_replan,
++        end_condition=None,
++        max_chat_history=max_chat_history,
++        print_log=print_log,
++    )
++
++    question = sample["question"]
++
++    try:
++        loop = asyncio.get_event_loop()
++        if loop.is_running():
++            raise RuntimeError("event loop already running")
++    except RuntimeError:
++        loop = asyncio.new_event_loop()
++        asyncio.set_event_loop(loop)
++
++    try:
++        raw_answer = loop.run_until_complete(agent.arun(question, callbacks=callbacks if callbacks else None))
++    except Exception as e:
++        raw_answer = f"Error: {e}"
++
++    try:
++        clear_pages()
++    except Exception:
++        pass
++
++    output = parse_answer(raw_answer) if raw_answer else ""
++    iterations = int(getattr(agent, "current_iter", 0) or 0) + 1
++
++    return {
++        "answer": output,
++        "raw_messages": [],
++        "iterations": iterations,
++    }
++
++
+ async def main(args):
+     print_log = bool(getattr(args, "print_log", False))
+     if args.workload not in ["hotpotqa", "webshop"]:
+diff --git a/run_react.py b/run_react.py
+index d695b98..28809b9 100644
+--- a/run_react.py
++++ b/run_react.py
+@@ -11,6 +11,85 @@ from langsmith import traceable, trace
+ 
+ load_dotenv()
+ 
++
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run ReAct on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): number of in-context examples (capped at 5).
++            iteration_limit (int): max graph recursion steps.
++            callbacks (list[BaseCallbackHandler] | None): LangChain callbacks.
++            model (str): model name.
++            base_url (str | None): OpenAI-compatible endpoint URL.
++            temperature (float): sampling temperature.
++            print_log (bool): verbose log.
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    from src.tools.hotpotqa_tools.wikipedia import WikipediaTool, LookupTool, FinishTool
++    from src.agents.ReAct.prompt.hotpotqa import get_system_prompt
++
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 0))
++    iteration_limit = int(agent_kwargs.get("iteration_limit", 30))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    base_url = agent_kwargs.get("base_url")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    model = ChatOpenAI(
++        model=model_name,
++        base_url=base_url,
++        stream_usage=True,
++        stop="\nObservation:",
++        temperature=temperature,
++        max_tokens=2048,
++        timeout=600,
++        callbacks=callbacks if callbacks else None,
++    )
++
++    system_prompt = get_system_prompt(fewshots=min(fewshot, 5))
++    tools = [WikipediaTool(name="search"), LookupTool(name="lookup"), FinishTool(name="finish")]
++    langgraph_agent_executor = create_react_agent(model, tools=tools, print_log=print_log)
++
++    question = sample["question"]
++    messages = [("system", system_prompt), ("human", question)]
++
++    final_chunk = None
++    iterations = 0
++    raw_messages = []
++    try:
++        for num, chunk in enumerate(
++            langgraph_agent_executor.stream(
++                {"messages": messages},
++                stream_mode="values",
++                config={
++                    "recursion_limit": iteration_limit,
++                    "callbacks": callbacks if callbacks else None,
++                },
++            )
++        ):
++            final_chunk = chunk
++            iterations = num + 1
++    except GraphRecursionError:
++        pass
++
++    if final_chunk is not None and final_chunk.get("messages"):
++        raw_messages = final_chunk["messages"]
++        answer = parse_answer(final_chunk["messages"][-1].content)
++    else:
++        answer = ""
++
++    return {
++        "answer": answer,
++        "raw_messages": raw_messages,
++        "iterations": iterations,
++    }
++
++
+ def main(args):
+     print_log = bool(getattr(args, "print_log", False))
+     if args.host:
+diff --git a/run_reflexion.py b/run_reflexion.py
+index 3868a34..d8a4800 100644
+--- a/run_reflexion.py
++++ b/run_reflexion.py
+@@ -11,6 +11,102 @@ from dotenv import load_dotenv
+ 
+ load_dotenv()
+ 
++
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run Reflexion on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): number of in-context examples.
++            iteration_limit (int): per-trial max steps.
++            reflection_limit (int): max number of trials (outer loop).
++            context_limit (int): scratchpad token cap.
++            callbacks (list[BaseCallbackHandler] | None).
++            model (str), base_url (str | None), temperature (float),
++            print_log (bool).
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    from src.tools.hotpotqa_tools.wikipedia import LookupTool, WikipediaTool, FinishTool
++    from src.utils import get_evaluation_function
++
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 0))
++    iteration_limit = int(agent_kwargs.get("iteration_limit", 7))
++    reflection_limit = int(agent_kwargs.get("reflection_limit", 3))
++    context_limit = int(agent_kwargs.get("context_limit", 4096))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    base_url = agent_kwargs.get("base_url")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    llm = ChatOpenAI(
++        model=model_name,
++        base_url=base_url,
++        stream_usage=True,
++        temperature=temperature,
++        max_tokens=2048,
++        timeout=600,
++        callbacks=callbacks if callbacks else None,
++    )
++
++    tools = [WikipediaTool(name="search"), LookupTool(name="lookup"), FinishTool(name="finish")]
++    action_prompt = get_action_prompt("hotpotqa")
++    reflection_prompt = get_reflection_prompt("hotpotqa")
++    action_examples = get_action_examples("hotpotqa", fewshot)
++    reflection_examples = get_reflection_examples("hotpotqa", fewshot)
++    evaluator = get_evaluation_function("hotpotqa")
++
++    agent = ReflexionAgent(
++        actor_llm=llm,
++        actor_prompt=action_prompt,
++        actor_examples=action_examples,
++        reflect_llm=llm,
++        reflect_prompt=reflection_prompt,
++        reflect_examples=reflection_examples,
++        tools=tools,
++        context_limit=context_limit,
++        workload="hotpotqa",
++        max_steps=iteration_limit,
++        evaluator=evaluator,
++        print_log=print_log,
++    )
++
++    question = sample["question"]
++    label = sample.get("answer", "")
++    agent.set_qa(question)
++
++    output = ""
++    total_iterations = 0
++    for trial in range(reflection_limit):
++        try:
++            ispass, _ = agent.evaluator(output, label)
++            if ispass:
++                break
++            # Each non-first trial triggers a reflection inside agent.run()
++            # (agent.run() calls self.reflect() before re-running).
++            if trial > 0:
++                try:
++                    from measurement.chat_wrapper import TRACE
++                    trace_obj = TRACE.get()
++                    trace_obj.n_reflections += 1
++                except (LookupError, ImportError):
++                    pass
++            output = agent.run()
++            total_iterations += getattr(agent, "step_n", 0)
++        except KeyboardInterrupt:
++            raise
++        except Exception as e:
++            output = f"Error: {e}"
++
++    return {
++        "answer": output,
++        "raw_messages": list(getattr(agent, "scratchpad_list", [])),
++        "iterations": total_iterations,
++    }
++
+ def get_tools(args):
+     if args.workload == "hotpotqa":
+         from src.tools.hotpotqa_tools.wikipedia import LookupTool, WikipediaTool, FinishTool
