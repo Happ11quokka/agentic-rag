@@ -1,0 +1,12 @@
+run_id: fig16c_lats_parallel
+workload: hotpotqa
+agent_type: lats
+defaults:
+  fewshot: 1
+  iteration_limit: 16
+  max_depth: 7
+  n_generate_sample: 5
+sweeps:
+  n_generate_sample: [1, 2, 4, 8]
+samples_per_cell: 10
+sample_seed: 42

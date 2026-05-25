@@ -1,0 +1,12 @@
+run_id: fig16b_lats_sequential
+workload: hotpotqa
+agent_type: lats
+defaults:
+  fewshot: 1
+  iteration_limit: 20
+  max_depth: 7
+  n_generate_sample: 5
+sweeps:
+  iteration_limit: [4, 8, 16, 32]   # 64 omitted — too slow on M3 Pro Q4
+samples_per_cell: 10                 # LATS is very heavy; keep tight
+sample_seed: 42
