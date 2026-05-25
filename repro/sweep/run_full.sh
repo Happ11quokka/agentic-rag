@@ -16,7 +16,8 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8000/v1}"
 
 CONFIG="$1"
 CACHE_MODE="${2:-default}"   # "default" (cache OFF) or "cache_on"
-RUN_ID="$(/usr/bin/python3 -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['run_id'])" "sweep/configs/$CONFIG")"
+# Use venv Python (system Python doesn't have PyYAML installed)
+RUN_ID="$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['run_id'])" "sweep/configs/$CONFIG")"
 OUT="results/raw/${RUN_ID}.jsonl"
 
 # Start llama-server in background if not running. Pick variant by CACHE_MODE.
