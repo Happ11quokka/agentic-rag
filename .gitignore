@@ -1,0 +1,19 @@
+# Reproduction outputs
+repro/models/*.gguf
+repro/results/raw/*.jsonl
+repro/results/aggregated/*.csv
+repro/results/figures/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# AgentBench clone
+AgentBench/
+
+# Misc
+.DS_Store
+*.log
+trace.txt
