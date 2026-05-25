@@ -15,13 +15,19 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-dummy-local}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8000/v1}"
 
 CONFIG="$1"
+CACHE_MODE="${2:-default}"   # "default" (cache OFF) or "cache_on"
 RUN_ID="$(/usr/bin/python3 -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['run_id'])" "sweep/configs/$CONFIG")"
 OUT="results/raw/${RUN_ID}.jsonl"
 
-# Start llama-server in background if not running
+# Start llama-server in background if not running. Pick variant by CACHE_MODE.
 if ! curl -s -o /dev/null http://localhost:8000/health; then
-    echo "Starting llama-server..."
-    ./setup/start_server.sh > "$LOG_DIR/llamaserver_$ts.log" 2>&1 &
+    if [[ "$CACHE_MODE" == "cache_on" ]]; then
+        echo "Starting llama-server with --cache-reuse ENABLED (Fig 9 variant)..."
+        ./setup/start_server_cache_on.sh > "$LOG_DIR/llamaserver_cacheon_$ts.log" 2>&1 &
+    else
+        echo "Starting llama-server (default, cache-reuse OFF)..."
+        ./setup/start_server.sh > "$LOG_DIR/llamaserver_$ts.log" 2>&1 &
+    fi
     sleep 10
 fi
 
