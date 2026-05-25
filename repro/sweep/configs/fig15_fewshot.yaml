@@ -1,0 +1,10 @@
+run_id: fig15_fewshot_sweep
+workload: hotpotqa
+agent_type: react
+defaults:
+  fewshot: 5
+  iteration_limit: 30
+sweeps:
+  fewshot: [0, 1, 2, 3, 4, 5]
+samples_per_cell: 50
+sample_seed: 42

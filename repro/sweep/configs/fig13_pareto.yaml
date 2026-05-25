@@ -1,0 +1,16 @@
+run_id: fig13_pareto
+workload: hotpotqa
+agent_types: [react, reflexion, lats, llmcompiler]
+samples_per_agent:
+  react: 50
+  reflexion: 50
+  lats: 25
+  llmcompiler: 50
+defaults:
+  fewshot: 5
+  iteration_limit: 30
+  reflection_limit: 3
+  max_depth: 7
+  n_generate_sample: 5
+  max_replan: 20
+sample_seed: 42
