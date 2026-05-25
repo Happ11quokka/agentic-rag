@@ -1,0 +1,26 @@
+diff --git a/config.yaml b/config.yaml
+index 6f13b47..4739a1d 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -1,13 +1,13 @@
+ # config.yaml
+ global:
+-  model: "Qwen/Qwen3-32B" 
+-  host: localhost
+-  port: 8000  
+-  temperature: 0.0                        
+-  samples: 5                                # Number of query samples to test the agent on
+-  shuffle: true                             # Shuffle the test samples  
+-  save_trace: true     
+-  trace_path: "./trace.txt"                 # Path to save the traces                
++  model: "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
++  host: 127.0.0.1
++  port: 8000
++  temperature: 0.0
++  samples: 1                # OUR sweep_runner drives the outer loop
++  shuffle: false            # See deterministic_select.patch (Task 9)
++  save_trace: true
++  trace_path: "./trace.txt"
+   webshop_url: "http://localhost:3000"
+ 
+ agents:
