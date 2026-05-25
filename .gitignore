@@ -13,6 +13,10 @@ __pycache__/
 # AgentBench clone
 AgentBench/
 
+# llama.cpp build artifacts
+repro/setup/llama.cpp.src/
+repro/setup/llama.cpp.build/
+
 # Misc
 .DS_Store
 *.log
