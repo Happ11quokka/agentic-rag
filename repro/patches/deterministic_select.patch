@@ -1,0 +1,23 @@
+diff --git a/src/utils.py b/src/utils.py
+index 0ca42ed..0f156da 100644
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -65,10 +65,17 @@ def load_dataset(workload: str, shuffle: bool = False):
+         print(f"Error loading dataset file {dataset_path}: {e}")
+         return []
+ 
++    seed = int(os.environ.get("REPRO_SAMPLE_SEED", "42"))
+     if shuffle:
+         print("Shuffling dataset...")
+         random.shuffle(data)
+-            
++    else:
++        # Deterministic: shuffle a list of indices with seeded RNG, then reorder
++        rng = random.Random(seed)
++        indices = list(range(len(data)))
++        rng.shuffle(indices)
++        data = [data[i] for i in indices]
++
+     return data
+ 
+ from src.tools.hotpotqa_tools.hotpot_evaluate import evaluate_hotpotqa
