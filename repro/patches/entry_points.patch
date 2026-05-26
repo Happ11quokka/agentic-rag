@@ -82,7 +82,7 @@ index e6a5493..1db701c 100644
      if args.workload not in ["hotpotqa", "webshop", "humaneval", "math"]:
          raise NotImplementedError(
 diff --git a/run_llmcompiler.py b/run_llmcompiler.py
-index 1fc38c7..9dba824 100644
+index 1fc38c7..e05e2b6 100644
 --- a/run_llmcompiler.py
 +++ b/run_llmcompiler.py
 @@ -103,6 +103,104 @@ async def run_agent(args, agent, question, label=None, evaluator=None):
@@ -126,17 +126,17 @@ index 1fc38c7..9dba824 100644
 +    planner_prompt = get_planner_prompt(fewshot)
 +
 +    def _make_llm():
-+        m = get_model(
++        # Do NOT use .bind() or .with_config() — LLMCompiler's planner internally
++        # does `self.llm.callbacks = callbacks` which fails on RunnableBinding.
++        # Callbacks propagate via agent.arun(question, callbacks=...) instead.
++        # Wall-clock timeout enforced by run_one watchdog, not per-call.
++        return get_model(
 +            model_name=model_name,
 +            host=host,
 +            port=port,
 +            temperature=temperature,
 +            max_tokens=2048,
 +        )
-+        bound = m.bind(timeout=600)
-+        if callbacks:
-+            bound = bound.with_config({"callbacks": callbacks})
-+        return bound
 +
 +    llm = _make_llm()
 +    planner_llm = _make_llm()
