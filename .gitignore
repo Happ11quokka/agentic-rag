@@ -4,6 +4,14 @@ repro/results/raw/*.jsonl
 repro/results/aggregated/*.csv
 repro/results/figures/*.png
 
+# Dense retrieval index artifacts (large; rebuilt by build_cohere_hotpot_index.py)
+repro/retrieval/index/
+
+# Secrets (never commit API keys)
+.env
+*.env
+.env.local
+
 # Python
 __pycache__/
 *.py[cod]

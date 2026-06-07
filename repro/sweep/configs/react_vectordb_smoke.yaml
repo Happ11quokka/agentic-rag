@@ -1,0 +1,15 @@
+run_id: react_vectordb_smoke
+workload: hotpotqa
+agent_type: react
+defaults:
+  fewshot: 5
+  iteration_limit: 30
+  retrieval_backend: vectordb
+  embed_model: embed-multilingual-v3.0
+  index_path: /Users/imdonghyeon/agentic_rag/repro/retrieval/index/cohere_hotpot.faiss
+  meta_path: /Users/imdonghyeon/agentic_rag/repro/retrieval/index/cohere_hotpot_meta.parquet
+  top_k: 5
+sweeps:
+  iteration_limit: [30]
+samples_per_cell: 12
+sample_seed: 42
