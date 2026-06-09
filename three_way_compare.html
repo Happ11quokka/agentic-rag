@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>decode-RAG — 3자 비교 (논문 vs 1차 vs 현재)</title>
+<style>
+  :root{
+    --bg:#0d0f14; --bg2:#161922; --bg3:#1a2030; --line:#2a2f3d;
+    --tx:#e8e8ea; --tx2:#b8c2db; --tx3:#8693b3;
+    --blue:#2c5cff; --blue2:#6ea8ff; --green:#5ae0a3; --amber:#ffa45e; --red:#ff7575;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:64px}
+  body{
+    background:var(--bg); color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Noto Sans KR","Apple SD Gothic Neo",sans-serif;
+    font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:0 4vw}
+  section{padding:3rem 0 1rem}
+
+  h2.sec{font-size:1.7rem;font-weight:700;color:#fff;letter-spacing:-.02em}
+  h3{color:#fff;font-size:1.18rem;margin:2.2rem 0 .2rem;font-weight:650;letter-spacing:-.01em}
+  p{margin:.5rem 0;color:var(--tx)}
+  strong{color:#fff}
+  code{background:#0a0c11;border:1px solid var(--line);border-radius:4px;padding:.05em .4em;font-size:.86em;color:#cdd6f0}
+  a{color:var(--blue2)}
+
+  /* ---- hero ---- */
+  .hero{
+    background:radial-gradient(ellipse at 15% 0%,#1a2548 0%,#0d0f14 60%);
+    border-bottom:1px solid var(--line);padding:3rem 0 2.6rem;
+  }
+  .hero .eyebrow{color:var(--blue2);font-size:.8rem;letter-spacing:.2em;text-transform:uppercase;font-weight:700}
+  .hero h1{font-size:2.3rem;color:#fff;font-weight:800;letter-spacing:-.025em;margin:.5rem 0 .3rem;line-height:1.15}
+  .hero .sub{color:var(--tx2);font-size:1.08rem;max-width:820px}
+  .hero .meta{margin-top:1.3rem;display:flex;gap:1.4rem;flex-wrap:wrap;font-size:.85rem;color:var(--tx3)}
+  .hero .meta b{color:var(--tx)}
+
+  /* ---- callouts ---- */
+  .callout{border-radius:0 8px 8px 0;padding:1rem 1.3rem;margin:1.4rem 0;font-size:.93rem}
+  .callout .lab{font-weight:700;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;display:block;margin-bottom:.35rem}
+  .callout.amber{background:rgba(255,164,94,.08);border-left:4px solid var(--amber)} .callout.amber .lab{color:var(--amber)}
+  .callout.blue{background:rgba(44,92,255,.1);border-left:4px solid var(--blue)} .callout.blue .lab{color:var(--blue2)}
+  .callout b{color:#fff}
+
+  /* ---- 3-column comparison grid ---- */
+  .tri{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1.1rem;margin:1rem 0 .2rem}
+  @media(max-width:900px){.tri{grid-template-columns:1fr}}
+  figure{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:.8rem;overflow:hidden}
+  figure img{width:100%;height:auto;display:block;border-radius:6px;background:#fff}
+  figcaption{font-size:.82rem;margin:.6rem .2rem 0;letter-spacing:.02em}
+  figcaption.paper{color:#aab8e0}      /* 📄 논문 */
+  figcaption.ours{color:var(--green)}   /* 📊 현재 */
+  figcaption.ours2{color:var(--amber)}  /* 📊 1차 (amber = WIKI 플롯색과 일치) */
+  .metric-cap{font-size:.9rem;color:var(--tx2);margin:.5rem 0 1.2rem;line-height:1.6}
+  .metric-cap b{color:#fff}
+  .metric-cap .warn{color:var(--amber)}
+
+  /* ---- collapsible deep-dive explanation ---- */
+  details.explain{background:var(--bg2);border:1px solid var(--line);border-radius:10px;margin:.2rem 0 1.6rem;padding:0 1.1rem}
+  details.explain summary{cursor:pointer;padding:.85rem 0;color:var(--blue2);font-weight:650;font-size:.92rem;list-style:none}
+  details.explain summary::-webkit-details-marker{display:none}
+  details.explain summary::before{content:"▸  ";color:var(--blue2)}
+  details.explain[open] summary::before{content:"▾  "}
+  details.explain .ex-body{padding:.2rem 0 1rem;border-top:1px solid var(--line)}
+  details.explain h4{color:#fff;font-size:.96rem;margin:1.1rem 0 .3rem}
+  details.explain p{font-size:.9rem;color:var(--tx2);line-height:1.62}
+  details.explain ul{padding-left:1.2rem;margin:.3rem 0}
+  details.explain li{font-size:.9rem;color:var(--tx2);line-height:1.6;margin:.35rem 0}
+  details.explain em{color:var(--tx);font-style:normal;border-bottom:1px dotted var(--tx3)}
+
+  /* ---- glossary (beginner terms) ---- */
+  .gloss-cat{color:var(--blue2);font-size:.8rem;font-weight:700;letter-spacing:.05em;margin:1.1rem 0 .35rem;text-transform:uppercase}
+  .glossary{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin:.2rem 0}
+  @media(max-width:780px){.glossary{grid-template-columns:1fr}}
+  .term{background:var(--bg3);border:1px solid var(--line);border-radius:9px;padding:.6rem .85rem}
+  .term b{color:#fff;font-size:.9rem}
+  .term span{display:block;color:var(--tx2);font-size:.85rem;margin-top:.18rem;line-height:1.5}
+
+  /* ---- summary table ---- */
+  .tbl{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem;background:var(--bg2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .tbl th,.tbl td{padding:.6rem .9rem;border-bottom:1px solid var(--line);text-align:left}
+  .tbl th{background:var(--bg3);color:var(--tx2);font-size:.76rem;letter-spacing:.04em;text-transform:uppercase;font-weight:700}
+  .tbl tr:last-child td{border-bottom:none}
+  .tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .tbl .hi{color:var(--green);font-weight:700}
+
+  footer{border-top:1px solid var(--line);margin-top:3rem;padding:2.2rem 0 4rem;color:var(--tx3);font-size:.85rem}
+  footer a{color:var(--blue2)}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">decode-RAG · 3-WAY COMPARISON</div>
+    <h1>같은 분석, 세 출처 — 논문 vs 1차 vs 현재</h1>
+    <p class="sub">동일 지표를 <b>논문(원본 그래프)</b> · <b>1차 실험(Live Wikipedia ReAct)</b> ·
+      <b>현재 실험(Cohere 벡터DB ReAct)</b> 세 출처로 나란히 비교. 환경이 다르므로
+      절대 시간이 아니라 <b>비율·구성·분포 형상</b>을 본다.</p>
+    <div class="meta">
+      <span>논문 <b>arXiv 2506.04301v2</b> (HPCA-2026, KAIST)</span>
+      <span>워크로드 <b>HotpotQA</b></span>
+      <span>1차·현재 <b>Llama-3.1-8B Q4 · M3 Pro</b></span>
+      <span>표본 <b>1차 50 · 현재 139문항</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section style="padding-top:2rem">
+    <h2 class="sec">시작하기 전에 — 초보자용 안내</h2>
+    <div class="callout green">
+      <span class="lab">📖 한 문장 요약</span>
+      AI 챗봇(LLM)에게 '검색 도구'를 쥐여주고 스스로 자료를 찾아가며 답하게 만든 게 <b>AI 에이전트</b>다.
+      그런데 검색 결과를 기다리는 동안 비싼 <b>GPU가 절반 가까이 논다(idle)</b>. 이 노는 시간을 측정하고,
+      검색을 미리 당겨와 숨겨서 줄이려는 것이 이 연구의 목표인 <b>decode-RAG</b>다. 이 보고서는 그 출발점으로,
+      검색 방식을 바꿔가며 "검색이 전체 시간의 몇 %를 먹는지"를 논문·1차·현재 세 출처로 비교한다.
+    </div>
+
+    <details class="explain" open>
+      <summary>핵심 용어 풀이 — 클릭해서 펼치기/접기</summary>
+      <div class="ex-body">
+        <div class="gloss-cat">① 큰 그림</div>
+        <div class="glossary">
+          <div class="term"><b>LLM (거대 언어 모델)</b><span>ChatGPT 같은 'AI 두뇌'. 이 실험은 작은 오픈 모델 Llama-3.1-8B를 노트북급 Mac(M3 Pro)에서 돌렸다.</span></div>
+          <div class="term"><b>AI 에이전트 (Agent)</b><span>LLM에 검색 같은 '도구'를 붙여, 한 번에 답하지 않고 생각→검색→관찰을 반복하며 스스로 답을 찾는 시스템.</span></div>
+          <div class="term"><b>ReAct</b><span>가장 기본적인 에이전트 방식. Reason(생각)+Act(행동) — 생각하고→검색하고→결과를 보고→다시 생각하기를 반복한다.</span></div>
+          <div class="term"><b>RAG (검색 증강 생성)</b><span>LLM이 답하기 전에 외부 문서를 검색(retrieval)해 참고하는 방식. 모르는 건 찾아보고 답한다.</span></div>
+          <div class="term"><b>decode-RAG <em>(이 연구의 목표)</em></b><span>LLM이 답을 한 토큰씩 생성(decode)하는 동안, 다음 검색을 미리 당겨와 겹쳐서 '기다리는 시간'을 숨기는 기법.</span></div>
+        </div>
+
+        <div class="gloss-cat">② 시간 · 하드웨어</div>
+        <div class="glossary">
+          <div class="term"><b>e2e latency (전체 지연)</b><span>질문을 받고 최종 답까지 걸린 총 시간(초). 'end-to-end'의 약자. 이 보고서 비율 계산의 분모.</span></div>
+          <div class="term"><b>GPU / GPU idle</b><span>GPU는 LLM 계산을 하는 비싼 장치. idle = GPU가 아무것도 안 하고 노는 시간(주로 검색을 기다릴 때 생김).</span></div>
+          <div class="term"><b>prefill / decode</b><span>LLM이 일하는 두 단계. prefill=받은 글을 한꺼번에 빠르게 읽기. decode=답을 한 토큰씩 순차 생성(메모리 대역폭에 묶여 느림).</span></div>
+          <div class="term"><b>token (토큰)</b><span>LLM이 다루는 텍스트의 최소 단위. 대략 단어 하나 또는 단어 조각.</span></div>
+        </div>
+
+        <div class="gloss-cat">③ 검색 (retrieval)</div>
+        <div class="glossary">
+          <div class="term"><b>retrieval / tool (검색 도구)</b><span>질문에 필요한 문서를 찾아오는 동작. 이 보고서에서 'tool'은 곧 검색을 뜻한다.</span></div>
+          <div class="term"><b>Live Wikipedia (1차)</b><span>실시간 위키피디아 키워드 검색. 느리고(~2초/회) 결과가 시간에 따라 바뀌어 재현이 어렵다.</span></div>
+          <div class="term"><b>Cohere 벡터DB (현재)</b><span>문장을 숫자 벡터로 바꿔(embedding) 의미가 비슷한 문서를 빠르게 찾는 방식. FAISS로 88만 문서에서 ~0.4초에 검색, 고정본이라 재현 가능.</span></div>
+          <div class="term"><b>hop / multi-hop</b><span>답에 도달하기까지 거치는 검색 단계 수. multi-hop = 여러 문서를 거쳐야 답이 나오는 어려운 질문.</span></div>
+          <div class="term"><b>HotpotQA</b><span>실험에 쓴 질문 데이터셋(총 7,405문제, 이번엔 앞 50개 사용). 대부분 multi-hop 질문이다.</span></div>
+          <div class="term"><b>dense / 의미 기반 검색</b><span>단어가 정확히 겹치지 않아도 '뜻'이 비슷하면 찾아주는 검색. 키워드 검색보다 똑똑하다.</span></div>
+        </div>
+
+        <div class="gloss-cat">④ 통계 용어</div>
+        <div class="glossary">
+          <div class="term"><b>EM accuracy (정확도)</b><span>Exact Match. 모델 답을 정답(gold)과 정규화(소문자·관사/구두점 제거) 후 <b>완전히 같으면</b> 정답으로 친 비율. 부분 점수 없음('15 August 1843' ≠ '1843').</span></div>
+          <div class="term"><b>F1 score (부분 점수)</b><span>답을 토큰(단어)으로 쪼개 정답과 <b>겹치는 정도</b>를 0~1로 잰다. '거의 맞은' 답에 부분 점수('15 August 1843' vs '1843' → F1 0.5). HotpotQA 공식 지표는 EM·F1 둘 다.</span></div>
+          <div class="term"><b>median(중앙값) · p50 · p95</b><span>median=p50=크기순 한가운데 값(평균보다 이상치에 강함). p95=느린 쪽 상위 5% 지점. 분포를 볼 때 쓴다.</span></div>
+          <div class="term"><b>heavy tail (두꺼운 꼬리)</b><span>대부분 빠른데 소수가 아주 느려서, 분포 그래프의 오른쪽이 길게 늘어진 모양.</span></div>
+          <div class="term"><b>share / fraction (비율)</b><span>전체를 100%로 놓았을 때 한 부분이 차지하는 몫(%). 이 보고서의 핵심은 'tool이 e2e에서 차지하는 비율'.</span></div>
+        </div>
+
+        <div class="gloss-cat">⑤ 이 보고서의 세 출처</div>
+        <div class="glossary">
+          <div class="term"><b>📄 논문</b><span>재현 대상인 KAIST 논문 "The Cost of Dynamic Reasoning"(HPCA-2026). 고성능 A100 GPU·vLLM 환경에서 측정.</span></div>
+          <div class="term"><b>📊 1차</b><span>기존 Live Wikipedia 검색으로 측정한 우리 실험(Llama-3.1-8B, M3 Pro).</span></div>
+          <div class="term"><b>📊 현재</b><span>Cohere 벡터DB + 로컬 cross-encoder <b>rerank</b>(FAISS top-50 → bge-reranker-base → top-5)로 검색한 우리 실험. 1차와 LLM·환경은 같다. <b>표본 139문항</b>(전체 7,405 스케일업 중 Cohere 쿼터로 일시 중단).</span></div>
+        </div>
+
+        <p style="font-size:.84rem;color:var(--tx3);margin-top:1rem">💡 아래 각 지표(①~⑥)마다 '자세한 해석' 블록이 있어, 이 용어들이 실제 그래프에서 어떻게 쓰이는지 풀어 설명한다.</p>
+      </div>
+    </details>
+  </section>
+
+  <section style="padding-top:1rem">
+    <div class="callout amber">
+      <span class="lab">⚠️ 비교의 전제 — 반드시 같이 읽을 것</span>
+      논문은 <b>A100 · vLLM · FP16</b>, 우리는 <b>M3 Pro · llama.cpp · Q4</b>다.
+      <b>절대 시간(초·Wh)은 비교 불가</b> — 비율·구성·분포 형상·순위만 비교한다.
+      또한 지표 <b>①②⑥</b>의 논문 수치는 <b>5종 에이전트·4벤치 평균</b>이라 ReAct-HotpotQA 단독값이 아니다
+      (<b>⑤</b>만 논문이 ReAct-HotpotQA를 직접 제공). 1차는 HotpotQA 전체 7,405문항 중 <b>앞 50문항(0.68%)</b>,
+      현재는 <b>앞 139문항(1.9%)</b> 표본 기반이다. <b>현재 = Cohere 벡터DB + rerank</b>(이전 dense-only 50문항 baseline을 대체).
+    </div>
+
+    <div class="callout blue">
+      <span class="lab">📐 연구 방법 — 정확도는 EM과 F1 둘 다로 잰다</span>
+      HotpotQA 공식 평가 지표인 <b>EM(Exact Match, 완전 일치)</b>과 <b>F1(토큰 단위 부분 점수)</b>을 함께 쓴다.
+      EM은 엄격해 '거의 맞은' 답도 0점 처리하므로(예: '15 August 1843' vs 정답 '1843'),
+      부분 점수를 주는 F1을 같이 봐서 실제 성능을 보완 측정한다. 채점기는 논문 표준
+      <code>hotpot_evaluate_v1.py</code>와 동일하게 맞췄다(소문자·관사/구두점 정규화 후 비교). EM은 그대로 두고 F1을 추가했다.
+    </div>
+
+    <div class="callout blue">
+      <span class="lab">⚖️ 누가 채점하나 — 사람도 LLM 심판도 아닌 결정론적 함수</span>
+      EM·F1 둘 다 <b>사람이나 다른 AI(LLM-judge)가 아니라 순수 파이썬 함수</b>가 기계적으로 채점한다.
+      평가에 들어가는 건 딱 셋 — 에이전트의 <b>최종 답(predicted)</b>, HotpotQA 데이터셋에 사람이 미리 적어둔
+      <b>정답(gold)</b>, 그리고 채점 함수다. 즉 <b>'기준' = gold 정답, '채점자' = 문자열 비교 함수</b>이고,
+      같은 입력이면 항상 같은 점수가 나오는 <b>결정론적(deterministic)</b> 방식이라 재현 가능하다.
+      이 함수는 임의로 만든 게 아니라 논문/벤치마크 표준
+      <code>hotpot_evaluate_v1.py</code>(AgentBench <code>hotpot_evaluate.py</code>)를 <b>byte-for-byte 그대로 포팅</b>해
+      (<code>repro/measurement/eval.py</code>), 우리 EM·F1이 논문 채점기와 정확히 일치한다.
+      <b>EM</b>은 정규화 후 완전 일치면 1, <b>F1</b>은 같은 정규화를 거친 답을 토큰으로 쪼개 겹침을
+      <code>2·P·R/(P+R)</code>로 0~1 점수화한다(yes/no/noanswer는 F1도 완전 일치만 인정).
+    </div>
+
+    <table class="tbl">
+      <thead><tr><th>지표</th><th>📄 논문</th><th>📊 1차 (Live Wikipedia, n=50)</th><th>📊 현재 (Cohere VDB + rerank, n=139)</th></tr></thead>
+      <tbody>
+        <tr><td>① retrieval-time fraction (tool/e2e)</td><td>idle 54.5% / tool 30.2%*</td><td class="num">44.8%</td><td class="num hi">31.3%</td></tr>
+        <tr><td>② latency 구성 (LLM / tool)</td><td>69.4% / 30.2%*</td><td class="num">55% / 45%</td><td class="num">68% / 31%</td></tr>
+        <tr><td>③ calls / query (LLM · tool)</td><td>9.2× (CoT 대비)*</td><td class="num">8.84 · 8.54</td><td class="num hi">5.67 · 5.50</td></tr>
+        <tr><td>④ 정확도 (EM / F1)</td><td>산점도(표 없음)</td><td class="num">32.0 / 38.5%</td><td class="num">30.9 / 41.9%</td></tr>
+        <tr><td>⑤ latency tail (p95/p50)</td><td>p95 20.7s</td><td class="num">3.15×</td><td class="num">4.66×</td></tr>
+        <tr><td>⑥ prefill / decode (추정)</td><td>4.7% / 74.1%*</td><td class="num">26% / 74%</td><td class="num">39% / 61%</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:.82rem;color:var(--tx3)">* 논문 ①②③⑥ 값은 에이전트·벤치 평균(ReAct-HotpotQA 단독 아님). 아래 각 행 캡션의 ⚠️ 참고.
+      &nbsp;·&nbsp; <b>현재 = Cohere VDB + rerank(n=139)</b> — rerank로 검색을 정당하게 무겁게 만들어 retrieval fraction이 dense-only(11%, 50문항) 대비 ~31%로 오르고 ①이 1차·논문대와 가까워졌다(⑦ 참고).</p>
+  </section>
+
+  <section style="padding-top:1rem">
+    <h2 class="sec">지표별 3자 비교</h2>
+
+    <!-- ① -->
+    <h3>① Retrieval-time fraction (tool ÷ e2e) — 헤드라인</h3>
+    <div class="tri">
+      <figure><img src="figures/fig6.png" alt="paper fig6 GPU idle"><figcaption class="paper">📄 논문 — Fig 6 GPU idle / 시간 분해 (HotpotQA 54.5%)</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m1_toolfrac_wiki.png" alt="1st"><figcaption class="ours2">📊 1차 — Live Wikipedia ReAct</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m1_toolfrac_vdb.png" alt="current"><figcaption class="ours">📊 현재 — Cohere VDB + rerank (n=139)</figcaption></figure>
+    </div>
+    <p class="metric-cap"><b>논문</b> GPU idle 54.5%(HotpotQA, retrieval 대기) · tool share 30.2%(평균) &nbsp;·&nbsp;
+      <b>1차</b> 44.8% (median 46.5%) &nbsp;·&nbsp; <b>현재</b> 31.3% (median 31.1%).
+      현재는 빠른 dense 검색에 <b>rerank</b>를 더해 retrieval를 정당하게 무겁게 만든 결과 — dense-only일 땐 11%로 떨어졌으나,
+      rerank로 <b>~31%</b>가 되어 논문 tool share 30.2%·1차 45%대와 같은 자릿수로 돌아왔고 재현 가능하다.
+      <span class="warn">⚠️ 환경이 달라 절대값 비교 불가 — 형상·비율만. 논문 30.2%는 에이전트·벤치 평균. 현재 n=139.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — 무슨 뜻이고, 왜 세 값이 다른가</summary>
+      <div class="ex-body">
+        <h4>이 지표가 측정하는 것</h4>
+        <p><b>tool ÷ e2e</b> = 한 질문을 푸는 전체 시간 중 <b>검색 응답을 기다린 시간의 비율</b>.
+          ReAct는 <em>생각 → 검색 → 관찰</em>을 반복하는데, 검색을 기다리는 동안 LLM(GPU)은 논다(idle).
+          이 노는 비율이 곧 <b>decode-RAG가 숨길 수 있는 비효율의 상한</b>이다.</p>
+
+        <h4>세 그래프 읽는 법</h4>
+        <ul>
+          <li><b>📄 논문 Fig 6</b> — GPU 시간 분해 막대(🔴prefill + 🩷decode + ⬛idle). HotpotQA의 ReAct 칸에서
+            검정(idle) ≈ <b>54.5%</b>. 반면 CoT(도구 없음)는 idle이 거의 0 → "도구 쓰는 에이전트가 GPU를 놀린다"가 논문의 메시지.</li>
+          <li><b>📊 1차 · 현재</b> — 점 하나 = 질문 하나(각 50개), 박스 = 가운데 50%, 굵은 선 = median.
+            1차는 30~60%로 넓게 퍼지고(med 46.5%), 현재(rerank)는 20~40%대에 몰린다(med 31.1%).</li>
+        </ul>
+
+        <h4>1차(45%) → dense-only(11%) → 현재 rerank(31%) — 세 단계로 읽기</h4>
+        <p><b>tool 총시간 = 검색당 시간 × 검색 횟수</b>. 백엔드를 바꿔가며 이 둘이 어떻게 변하는지:</p>
+        <table class="tbl">
+          <thead><tr><th></th><th>검색당 시간</th><th>검색 횟수/질문</th><th>tool 총시간 (med)</th><th>e2e (med)</th><th>= 비율</th></tr></thead>
+          <tbody>
+            <tr><td><b>1차</b> Live Wiki (n=50)</td><td class="num">~2,004 ms</td><td class="num">8.54회</td><td class="num">12.2 s</td><td class="num">27.7 s</td><td class="num">44.8%</td></tr>
+            <tr><td>dense-only (n=50)</td><td class="num">~415 ms</td><td class="num">4.96회</td><td class="num">1.2 s</td><td class="num">10.5 s</td><td class="num">11.1%</td></tr>
+            <tr><td><b>현재</b> +rerank (n=139)</td><td class="num">~1,946 ms</td><td class="num">5.50회</td><td class="num hi">6.3 s</td><td class="num">20.3 s</td><td class="num hi">31.3%</td></tr>
+          </tbody>
+        </table>
+        <p>dense-only는 검색이 너무 빨라(~415ms) 비율이 11%로 <b>급락</b>했다 — "RAG가 너무 빠르다"(⑦). 그래서
+          <b>rerank</b>(FAISS top-50 → cross-encoder → top-5)를 더해 검색을 <em>정당하게</em>(인위적 지연이 아니라 실제 연산으로)
+          ~1,946ms로 무겁게 했다. 그 결과 tool이 1.2s→6.3s로 커지고 비율이 <b>11% → 31%</b>로 올라
+          논문 tool share 30%·1차 45%대와 같은 자릿수로 돌아왔다. 핵심: <b>검색을 의미있게 무겁게 만들어야 decode-RAG로 숨길 여지가 생긴다.</b></p>
+
+        <h4>논문 54.5% ≈ 1차 44.8% — 비슷하면서 왜 다른가</h4>
+        <p>둘 다 느린 라이브 검색이라 같은 ~45–55%대(패턴 일치). 미세 차이는 <b>측정 방식</b>(논문 = GPU idle,
+          DCGM 하드웨어 측정 / 1차 = tool÷e2e wall-clock)과 <b>LLM 속도</b>(A100/vLLM은 LLM이 빨라 검색 대기
+          비중↑, M3/Q4는 LLM이 느려 분모 e2e가 커지며 비중↓) 때문.</p>
+
+        <h4>decode-RAG 연구에의 의미</h4>
+        <p>1차 ~45% = 상한(비재현, 라이브 API 드리프트), 현재 ~11% = <b>재현 가능한 하한</b>(로컬 FAISS만이면 ~2%).
+          두 끝점으로 <b>bracket</b>하면 앞으로 만들 prefetch/overlap 기법의 잠재 이득 범위를 정량화할 수 있다.
+          <b>역설</b>: 좋은 검색일수록 이 비율이 낮아진다 → decode-RAG의 동기는 검색이 느리거나 코퍼스가 큰 환경에서 더 강해진다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ 논문 막대(GPU idle, DCGM)와 우리 box(tool/e2e,
+          wall-clock)는 정의가 달라 "같은 축 정밀 비교"가 아니라 형상·자릿수 비교다. 현재는 139문항, 1차는 50문항 표본 기반.</p>
+      </div>
+    </details>
+
+    <!-- ② -->
+    <h3>② Latency 구성 (LLM / tool / overhead)</h3>
+    <div class="tri">
+      <figure><img src="figures/fig5.png" alt="paper fig5"><figcaption class="paper">📄 논문 — Fig 5 지연 분해 (LLM 69.4% / tool 30.2%)</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m2_latcomp_wiki.png" alt="1st"><figcaption class="ours2">📊 1차 — Live Wikipedia ReAct</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m2_latcomp_vdb.png" alt="current"><figcaption class="ours">📊 현재 — Cohere VDB + rerank (n=139)</figcaption></figure>
+    </div>
+    <p class="metric-cap"><b>논문</b> LLM 69.4% / tool 30.2% (평균) &nbsp;·&nbsp;
+      <b>1차</b> LLM 55% / tool 45% &nbsp;·&nbsp; <b>현재</b> LLM 68% / tool 31%.
+      rerank로 tool 조각이 다시 커져(11%→31%) <b>현재 68/31이 논문 69/30과 거의 일치</b>한다.
+      <span class="warn">⚠️ 논문값은 5종 에이전트·4벤치 평균. 우리는 ReAct-HotpotQA. 현재 n=139.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — Y축이 뭐고, 이 그래프가 의미하는 것</summary>
+      <div class="ex-body">
+        <h4>Y축 = "share of e2e latency (%)" — 전체 시간의 100% 분해</h4>
+        <p>한 질문의 전체 처리 시간(e2e)을 <b>100%로 놓고</b>, 그 시간이 어디에 쓰였는지 쌓아올린(stacked) 막대다.
+          🔴LLM(생각·추론 계산) + ⬛Tool(검색 대기) + 회색 overhead가 합쳐서 100%.
+          ①이 'tool 조각 하나'만 따로 본 것이라면, ②는 <b>그 tool + 나머지(LLM)까지 전부</b> 보여준다.
+          그래서 ②의 tool% = ①의 평균 비율과 같다(1차 45%≈44.8%, 현재 31%≈31.3%).</p>
+
+        <h4>막대 읽는 법</h4>
+        <ul>
+          <li>아래 🔴빨강 = LLM 계산(prefill+decode), 위 ⬛검정 = Tool(검색 대기), 맨 위 회색 = overhead(거의 0이라 안 보임).</li>
+          <li>조각 높이 = 그 비율. 합은 항상 100%라서 <b>한쪽이 커지면 다른 쪽이 자동으로 작아진다</b>(zero-sum).</li>
+        </ul>
+
+        <h4>세 그래프가 말하는 것</h4>
+        <ul>
+          <li><b>📄 논문 Fig 5</b> — 평균 LLM 69.4% / tool 30.2%. 분홍(LLM+Tool overlap)은 LLMCompiler가
+            <b>도구를 LLM과 겹쳐 비동기 실행</b>한 부분 — 이게 바로 decode-RAG가 노리는 "검색 숨기기"의 선례다.</li>
+          <li><b>📊 1차</b> LLM 55% / tool 45% — 느린 라이브 검색이 거의 절반을 먹는다.</li>
+          <li><b>📊 현재</b> LLM 68% / tool 31% — rerank로 tool 조각이 다시 커져 논문(69/30)과 거의 일치한다.</li>
+        </ul>
+
+        <h4>왜 현재가 LLM 68% / tool 31%인가 (dense-only 88/11에서 회복)</h4>
+        <p>dense-only일 땐 검색이 ~5배 빨라(2,004→415ms) tool이 11%로 쪼그라들고 LLM이 88%를 먹었다.
+          여기에 <b>rerank</b>(cross-encoder 연산)를 더해 검색을 ~1,946ms로 무겁게 하니 tool 조각이 31%로 커졌다.
+          전체가 100%라 tool이 커진 만큼 LLM 비중은 88%→68%로 내려와 <b>논문 69/30 구성과 거의 일치</b>한다.</p>
+
+        <h4>decode-RAG에의 의미</h4>
+        <p>검정(tool) 조각이 클수록 = LLM이 노는 시간이 크다 = decode-RAG로 숨길 여지가 크다.
+          dense-only(11%)는 여지가 거의 없었지만, <b>rerank로 31%까지 키워</b> 숨길 여지를 의미있게 확보했다.
+          이게 ⑦에서 hop별 retrieval≈decode(1:1)를 맞춘 것과 같은 맥락이다 — decode-RAG 기법을 실험할
+          토대가 마련됐다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ 논문값은 5종 에이전트·4벤치 평균이라
+          ReAct-HotpotQA 단독값이 아님. overhead는 거의 0. 현재 n=139, 1차 n=50 표본.</p>
+      </div>
+    </details>
+
+    <!-- ③ -->
+    <h3>③ Calls per query (LLM · tool)</h3>
+    <div class="tri">
+      <figure><img src="figures/fig4.png" alt="paper fig4"><figcaption class="paper">📄 논문 — Fig 4 요청당 LLM·Tool 호출</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m3_calls_wiki.png" alt="1st"><figcaption class="ours2">📊 1차 — Live Wikipedia ReAct</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m3_calls_vdb.png" alt="current"><figcaption class="ours">📊 현재 — Cohere VDB + rerank (n=139)</figcaption></figure>
+    </div>
+    <p class="metric-cap"><b>논문</b> 도구 에이전트는 CoT 대비 LLM 호출 9.2×(LATS 71×) &nbsp;·&nbsp;
+      <b>1차</b> LLM 8.84 / tool 8.54 &nbsp;·&nbsp; <b>현재</b> 5.67 / 5.50.
+      커버리지 높은 dense+rerank 검색이 더 적은 hop으로 정답에 도달(8.5→5.5회).
+      <span class="warn">⚠️ 논문은 ReAct 절대 호출수를 표기하지 않음(비율만). ReAct는 구조상 LLM≈tool 호출. 현재 n=139.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — Y축이 뭐고, 이 그래프가 의미하는 것</summary>
+      <div class="ex-body">
+        <h4>Y축 = "calls per query (mean)" — 질문당 평균 호출 횟수</h4>
+        <p>한 질문을 푸는 데 LLM을 몇 번 부르고(왼쪽 막대), 검색 도구를 몇 번 호출했는지(오른쪽 빗금 막대)의 평균.
+          ReAct는 <em>생각(LLM 호출) → 검색(tool 호출) → 관찰</em>을 반복하므로 구조상 <b>LLM 호출 ≈ tool 호출</b>이다.</p>
+
+        <h4>세 그래프가 말하는 것</h4>
+        <ul>
+          <li><b>📄 논문 Fig 4</b> — 도구 에이전트는 CoT(1회) 대비 LLM 호출이 평균 9.2배, LATS는 71배까지 폭증.
+            "동적 추론이 LLM 호출을 폭증시킨다"가 메시지. (ReAct 단독 절대 횟수는 표기 안 함 — 비율만.)</li>
+          <li><b>📊 1차</b> LLM 8.84 / tool 8.54회 — 라이브 검색이 부정확해 더 많은 hop을 돈다.</li>
+          <li><b>📊 현재</b> LLM 5.67 / tool 5.50회 — dense+rerank 검색이 정확해 1차(8.5회)보다 <b>적은 횟수</b>로 정답에 도달.</li>
+        </ul>
+
+        <h4>왜 8.5회 → 5.5회로 줄었나</h4>
+        <p>Cohere 벡터DB는 의미 기반(dense) 검색이고 rerank로 관련도가 더 올라, 한 번에 더 관련된 문서를 가져온다.
+          "다시 검색"이 줄어 hop 수가 감소한다(어려운 multi-hop 질문만 많이 돈다).
+          호출이 적다는 건 <b>왕복(round-trip)이 적다 = 그만큼 idle도 적다</b>는 뜻.</p>
+
+        <h4>decode-RAG에의 의미</h4>
+        <p>호출 횟수 = LLM↔검색 왕복 횟수 = decode-RAG가 끼어들(겹칠) 지점의 개수. 횟수가 많을수록(1차) 숨길
+          기회가 많지만 그만큼 비효율도 크다. 적은 호출(현재)은 효율적이지만 prefetch로 숨길 여지는 작아진다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ 논문은 ReAct 절대 호출수 대신 비율(9.2×)만 제시.
+          현재 n=139, 1차 n=50 표본.</p>
+      </div>
+    </details>
+
+    <!-- ④ -->
+    <h3>④ 정확도 — EM(엄격) + F1(부분 점수)</h3>
+    <div class="tri">
+      <figure><img src="figures/fig13.png" alt="paper fig13"><figcaption class="paper">📄 논문 — Fig 13 Accuracy vs Latency Pareto</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m4_em_wiki.png" alt="1st"><figcaption class="ours2">📊 1차 — Live Wikipedia ReAct</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m4_em_vdb.png" alt="current"><figcaption class="ours">📊 현재 — Cohere VDB + rerank (n=139)</figcaption></figure>
+    </div>
+    <p class="metric-cap"><b>논문</b> Fig 13 산점도(ReAct는 표로 미기재) &nbsp;·&nbsp;
+      <b>1차</b> EM 32.0% / F1 38.5% &nbsp;·&nbsp; <b>현재</b> EM 30.9% / F1 41.9%.
+      현재가 <b>F1 +3.4%p</b>(부분 점수 우위, "거의 맞은" 답이 더 많음)지만 EM은 −1.1%p로 비슷 — dense+rerank가 증거 질을 높여도 EM은 표본·난이도에 민감.
+      <span class="warn">⚠️ 논문 Table III는 Reflexion/LATS만 수록. <b>표본 불일치</b>(현재 n=139 vs 1차 n=50)라 직접 비교 아님 — 같은 첫 50문항 기준일 땐 거의 불변.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — Y축이 뭐고, 이 그래프가 의미하는 것</summary>
+      <div class="ex-body">
+        <h4>그래프의 두 막대 = EM(엄격) + F1(부분 점수)</h4>
+        <p><b>EM (Exact Match)</b> = 모델 답이 정답과 정규화(소문자·관사/구두점 제거) 후 <b>완전히 같아야</b> 1점.
+          부분 점수가 없어 '거의 맞은' 답도 0점이다(예: '15 August 1843' vs '1843').
+          <b>F1</b> = 답을 토큰으로 쪼개 <b>겹치는 정도</b>를 0~1로 주는 부분 점수(그 예의 F1은 0.5).
+          HotpotQA 공식 지표가 이 둘이라 함께 본다.</p>
+
+        <h4>세 그래프가 말하는 것</h4>
+        <ul>
+          <li><b>📄 논문 Fig 13</b> — Accuracy-vs-Latency 산점도. ReAct-HotpotQA의 정확도는 <b>표로 적혀있지 않고</b>
+            산점도 점으로만 표시(논문 Table III는 Reflexion/LATS만 수록).</li>
+          <li><b>📊 1차</b> EM 32.0%(16/50) / F1 38.5% &nbsp;·&nbsp; <b>📊 현재</b> EM 30.9% / F1 41.9% (n=139).</li>
+        </ul>
+
+        <h4>현재(dense+rerank)는 F1이 1차보다 높다 (F1 +3.4%p, EM −1.1%p)</h4>
+        <p>키워드 기반 라이브 검색 → 의미 기반(dense)+rerank로 바꾸니 <b>더 관련 있는 문서</b>를 가져와
+          <b>증거(context)의 질</b>이 올라간다. 그 결과 <b>F1(부분 점수)은 +3.4%p</b> 올랐다 — 완전히 맞히진 못해도
+          '정답에 더 가까운' 답이 늘었다. EM은 −1.1%p로 사실상 비슷한데, <b>표본이 다르다</b>(현재 n=139 vs 1차 n=50)는
+          점을 감안해야 한다(같은 첫 50문항만 보면 거의 불변이었다).</p>
+
+        <h4>decode-RAG에의 의미</h4>
+        <p>핵심: rerank로 검색을 무겁게(느리게) 만들었는데도 <b>정확도는 떨어지지 않고 F1은 오히려 올랐다</b>.
+          즉 retrieval를 키워 decode-RAG로 숨길 여지를 확보하면서도 정확도 손해가 없다 — "비율 맞추기"가 공짜에 가깝다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ <b>표본 불일치</b>(현재 n=139 vs 1차 n=50)라 EM/F1 직접 비교는 주의.
+          EM은 부분 점수가 없어 보수적이라 F1을 함께 본다. 논문 정확도는 산점도에서 읽은 값.</p>
+      </div>
+    </details>
+
+    <!-- ⑤ -->
+    <h3>⑤ Latency 분포 — heavy tail (p95 / p50)</h3>
+    <div class="tri">
+      <figure><img src="figures/fig7.png" alt="paper fig7"><figcaption class="paper">📄 논문 — Fig 7 단대단 지연 분포 (ReAct-HotpotQA p95 20.7s)</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m5_lattail_wiki.png" alt="1st"><figcaption class="ours2">📊 1차 — Live Wikipedia ReAct</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m5_lattail_vdb.png" alt="current"><figcaption class="ours">📊 현재 — Cohere VDB + rerank (n=139)</figcaption></figure>
+    </div>
+    <p class="metric-cap"><b>논문</b> ReAct-HotpotQA p95 = 20.7s (이 지표만 논문이 직접 제공) &nbsp;·&nbsp;
+      <b>1차</b> p50 27.7s / p95 87.2s (3.15×) &nbsp;·&nbsp; <b>현재</b> p50 20.3s / p95 94.5s (4.66×).
+      rerank가 검색을 무겁게 해 현재 p50이 20.3s로 올랐고(dense-only 10.5s 대비), 세 출처 모두 heavy-tail 형상을 재현.
+      <span class="warn">⚠️ 절대 초는 환경차로 다름 — 꼬리의 형상/비율만 비교. 현재 n=139.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — X·Y축이 뭐고, 이 그래프가 의미하는 것</summary>
+      <div class="ex-body">
+        <h4>X·Y축 = 지연 시간의 분포</h4>
+        <p>X축 = 한 질문의 e2e 지연(초), Y축 = 그 지연이 나온 <b>빈도 밀도</b>(histogram). 즉 "몇 초짜리 질문이
+          얼마나 많은가". 점선은 <b>p50(중앙값, 검정)</b>과 <b>p95(상위 5%, 빨강)</b>.</p>
+
+        <h4>heavy tail이란 — p95/p50 비율</h4>
+        <p>대부분 질문은 빠른데(p50) <b>소수의 어려운 multi-hop 질문이 아주 느려서</b> 오른쪽으로 긴 꼬리를 만든다.
+          p95/p50가 클수록 꼬리가 두껍다(편차가 크다). 논문도 같은 heavy-tail을 보고함 — 정적 챗봇(ShareGPT)엔 없는 에이전트 특유의 현상.</p>
+
+        <h4>세 그래프가 말하는 것</h4>
+        <ul>
+          <li><b>📄 논문 Fig 7</b> — ReAct-HotpotQA p95 = 20.7s (이 지표만 논문이 ReAct-HotpotQA를 직접 제공).</li>
+          <li><b>📊 1차</b> p50 27.7s / p95 87.2s → <b>3.15×</b></li>
+          <li><b>📊 현재</b> p50 20.3s / p95 94.5s → <b>4.66×</b></li>
+        </ul>
+
+        <h4>현재의 꼬리 비율(4.66)은 1차(3.15)보다 크다</h4>
+        <p>현재는 rerank로 검색이 무거워져 p50이 20.3s(dense-only 10.5s보다 느림). 쉬운 질문은 적당히 느려지지만
+          어려운 multi-hop 질문은 검색을 많이 돌아 p95가 94.5s까지 늘어, <b>빠른 질문과 느린 질문의 격차가 벌어져</b>
+          꼬리 비율이 커진다. 세 출처 모두 같은 heavy-tail 형상을 재현하는 것이 핵심.</p>
+
+        <h4>decode-RAG에의 의미</h4>
+        <p>꼬리(느린 질문)일수록 검색 왕복이 많아 LLM이 더 오래 논다 = decode-RAG 이득이 꼬리에서 가장 크다.
+          평균이 아니라 <b>p95 같은 꼬리를 줄이는 것</b>이 서빙(throughput) 관점에서 특히 중요하다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ 절대 초는 환경(A100 vs M3)차로 직접 비교 불가 — 꼬리의 형상/비율만.
+          현재 n=139, 1차 n=50 표본.</p>
+      </div>
+    </details>
+
+    <!-- ⑥ -->
+    <h3>⑥ Prefill / decode 분할 (추정)</h3>
+    <div class="tri">
+      <figure><img src="figures/fig6.png" alt="paper fig6"><figcaption class="paper">📄 논문 — Fig 6 (active LLM 중 prefill 4.7% / decode 74.1%)</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m6_prefdec_wiki.png" alt="1st"><figcaption class="ours2">📊 1차 — Live Wikipedia ReAct</figcaption></figure>
+      <figure><img src="repro/results/figures/three_way/m6_prefdec_vdb.png" alt="current"><figcaption class="ours">📊 현재 — Cohere VDB + rerank (n=139)</figcaption></figure>
+    </div>
+    <p class="metric-cap"><b>논문</b> active LLM 시간 중 prefill 4.7% / decode 74.1% &nbsp;·&nbsp;
+      <b>1차</b> prefill 26% / decode 74% &nbsp;·&nbsp; <b>현재</b> prefill 39% / decode 61%.
+      세 출처 모두 <b>decode 우세</b> 형상이 일치.
+      <span class="warn">⚠️ 우리값은 wall-clock 추정치(<code>*_estimate</code>)이고 분모가 다름(논문=idle 포함 GPU 시간, 우리=active-LLM 시간) — 형상만.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — Y축이 뭐고, 이 그래프가 의미하는 것</summary>
+      <div class="ex-body">
+        <h4>Y축 = "share of active LLM time (%)" — LLM 계산 시간의 분해</h4>
+        <p>②가 e2e 전체를 LLM/tool로 나눴다면, ⑥은 그중 <b>LLM이 실제로 계산하는 시간</b>만 떼어
+          <b>prefill</b>(입력 프롬프트를 한 번에 읽어들이는 단계)과 <b>decode</b>(답 토큰을 하나씩 생성하는 단계)로 나눈 것. 합쳐서 100%.</p>
+
+        <h4>prefill vs decode — 왜 중요한가</h4>
+        <p>prefill은 입력을 한꺼번에 처리해 빠르고, decode는 답을 한 토큰씩 순차 생성하는데 연산량보다
+          <b>메모리 대역폭에 묶여(memory-bound)</b> 느리다(논문 §V-A). <b>decode 우세</b>면 "답을 생성하느라 시간을 쓴다"는 뜻.
+          prefix caching 같은 최적화는 주로 prefill을 줄인다.</p>
+
+        <h4>세 그래프가 말하는 것</h4>
+        <ul>
+          <li><b>📄 논문 Fig 6</b> — active LLM 시간 중 prefill 4.7% / decode 74.1%(나머지는 idle). <b>decode 압도적</b>.</li>
+          <li><b>📊 1차</b> prefill 26% / decode 74% &nbsp;·&nbsp; <b>📊 현재</b> prefill 39% / decode 61%.</li>
+        </ul>
+        <p>세 출처 모두 <b>decode가 우세</b>한 같은 형상 → 패턴 일치. 현재가 prefill 비중이 좀 더 큰 건
+          rerank로 가져온 검색 결과(context)를 매번 다시 읽어들이는 prefill 부담이 상대적으로 커서다.</p>
+
+        <h4>decode-RAG에의 의미 + 주의</h4>
+        <p>decode가 우세하다는 건 <b>decode 도중에 검색을 미리 당겨올(prefetch) 시간 여유가 충분하다</b>는 뜻 —
+          decode-RAG의 전제가 성립함을 보여준다. 다만 이 값은 정밀 측정이 아니라 추정치다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ 우리 prefill/decode는 wall-clock <code>*_estimate</code>(추정치)이고
+          논문은 분모가 다름(논문=idle 포함 GPU 시간, 우리=active-LLM 시간). 절대값이 아니라 "decode 우세" 형상만 비교. 현재 n=139, 1차 n=50 표본.</p>
+      </div>
+    </details>
+  </section>
+
+  <section>
+    <h2 class="sec">⑦ 심화 — 현재 백엔드의 hop별 retrieval·decode 균형</h2>
+    <div class="callout amber">
+      <span class="lab">📌 이 섹션은 3자 비교가 아님</span>
+      위 ①~⑥은 논문·1차·현재 <b>3자 비교</b>였다. ⑦은 <b>현재(Cohere 벡터DB) 백엔드 내부</b>를 hop 단위로 쪼개,
+      "각 검색이 그 직후 LLM 작업(decode)에 비해 얼마나 짧은가"를 본다 — decode-RAG로 검색을 숨길 여지가
+      hop마다 얼마나 되는지 측정하는 출발점이다.
+    </div>
+
+    <h3>한 hop = 검색 1회 + 그 직후 LLM call</h3>
+    <p class="metric-cap">기존 react_vectordb 50개 trace에서 <b>198개 hop</b>을 페어링(검색 span → 직후 LLM span).
+      retrieval은 wall-clock(정확), decode는 두 가지로 측정: <b>LLM 전체(prefill+decode)</b>와
+      <b>순수 decode</b>(추정치, 신뢰 hop 152개).</p>
+
+    <figure><img src="repro/results/figures/hop_balance/hop_scatter.png" alt="hop scatter">
+      <figcaption class="ours">📊 hop별 retrieval vs decode — 점=hop, 점선=1:1 기준선 (좌: LLM 전체 / 우: 순수 decode)</figcaption></figure>
+    <figure style="margin-top:1.1rem"><img src="repro/results/figures/hop_balance/hop_ratio_hist.png" alt="hop ratio">
+      <figcaption class="ours">📊 hop별 retrieval/decode 비율 분포 — 목표 1.0, 현재 median 0.12~0.23</figcaption></figure>
+
+    <p class="metric-cap">거의 모든 hop이 <b>1:1 선 아래</b> — retrieval이 decode보다 훨씬 짧다.
+      median 비율 <b>0.12</b>(LLM 전체 기준) / <b>0.23</b>(순수 decode 기준). 즉 1:1로 맞추려면 retrieval을
+      <b>약 8.6배</b>(LLM 전체) ~ <b>4.3배</b>(decode) 키워야 한다.
+      <span class="warn">⚠️ 지금은 retrieval이 작아 decode-RAG로 숨겨도 이득이 작다 — 이게 "RAG가 너무 빠르다"의 정량.</span></p>
+
+    <details class="explain" open>
+      <summary>자세한 해석 — 그래서 어떻게 1:1에 맞추나</summary>
+      <div class="ex-body">
+        <h4>왜 hop 단위로 보나</h4>
+        <p>decode-RAG는 한 hop의 <em>검색 대기</em>를 <em>그 다음 LLM이 답을 생성하는 시간</em> 뒤로 숨긴다.
+          따라서 hop마다 retrieval ≈ decode여야 검색을 거의 다 가릴 수 있다(이득 최대). retrieval이 너무 짧으면 숨겨도 미미.</p>
+
+        <h4>현재 측정 결과</h4>
+        <ul>
+          <li><b>retrieval</b> median 438ms · <b>decode-only</b> median 1,967ms · <b>LLM-total</b> median 4,006ms</li>
+          <li>비율 median: retrieval/decode-only <b>0.23</b>, retrieval/LLM-total <b>0.12</b></li>
+          <li>대부분 hop이 1:1 선 한참 아래(분포가 0~0.4에 몰림). 소수 outlier(느린 검색, 비율 1~5)만 위쪽.</li>
+        </ul>
+
+        <h4>1:1에 맞추는 정당한 레버 (다음 단계)</h4>
+        <p>인위적 지연(<code>sleep</code>)은 연구적으로 무의미하므로 <b>실제 연산</b>으로 retrieval을 키운다:
+          ① <b>reranking 추가</b>(cross-encoder/Cohere rerank, hop당 +50~200ms) ② <b>top_k 확대</b>(5→50)
+          ③ <b>코퍼스/인덱스 확대</b> ④ 무거운 임베딩. 현재 retrieval 438ms의 대부분이 Cohere API 네트워크라,
+          진짜 "검색 연산"을 늘리는 <b>rerank</b>가 가장 자연스럽다.</p>
+
+        <h4>주의 — decode 기준에 따라 목표가 다름</h4>
+        <p>순수 decode만 겹친다면 ~4.3배, LLM 전체(prefill 포함)를 겹친다면 ~8.6배가 1:1 목표다.
+          decode-RAG가 실제로 어느 구간을 겹칠 수 있는지(prefill 중에도 prefetch 가능한지)가 이 선택을 정한다.</p>
+
+        <p style="font-size:.82rem;color:var(--tx3);margin-top:.8rem">⚠️ decode-only는 추정치(coarse_attribution 제외, 152/198 hop).
+          retrieval·LLM-total은 wall-clock 전수. 분석 스크립트: <code>repro/analysis/plot_hop_balance.py</code>.</p>
+      </div>
+    </details>
+    <h3>✅ rerank 적용 결과 — 비율이 1:1로 이동</h3>
+    <div class="callout green">
+      <span class="lab">📌 로컬 cross-encoder rerank 추가 후 (FAISS top-50 → bge-reranker-base → top-5)</span>
+      hop별 retrieval/decode-only 비율이 <b>0.23 → 1.08</b>로 올라 <b>1:1 목표를 거의 정확히 달성</b>했다.
+      이제 각 hop에서 검색 시간 ≈ decode 시간이라, decode-RAG가 검색을 거의 다 숨길 수 있는 상태다.
+    </div>
+    <div class="callout amber">
+      <span class="lab">📊 표본 확대 — 50 → 139문항 (rerank 런)</span>
+      이 rerank 결과는 처음 <b>50문항</b>에서 측정했던 것을, 전체 7,405문항으로 스케일업하던 중
+      <b>139문항(1.9%)</b>까지 모인 시점의 값이다. 표본이 커지며 비율이 <b>1.27 → 1.08</b>로
+      1:1에 더 가까워졌다(더 안정적). 나머지는 Cohere <b>trial 키 월 1,000회 한도</b>에 막혀 일시 중단 —
+      production 키로 교체하면 이어서 완주 가능(진도 보존). 아래 ①~⑥ 3자 비교는 별개의
+      비-rerank <code>react_vectordb</code> 50문항 기준이라 영향 없음.
+    </div>
+    <figure><img src="repro/results/figures/hop_balance/hop_compare.png" alt="rerank before/after">
+      <figcaption class="ours">📊 hop별 retrieval/decode 비율 — rerank 전(회색) vs 후(초록), 점선=1:1 목표</figcaption></figure>
+    <table class="tbl">
+      <thead><tr><th>지표</th><th>rerank 전 (n=50, 비-rerank)</th><th>rerank 후 (n=139)</th></tr></thead>
+      <tbody>
+        <tr><td>hop retrieval / decode-only (median)</td><td class="num">0.23</td><td class="num hi">1.08</td></tr>
+        <tr><td>hop retrieval / LLM-total (median)</td><td class="num">0.12</td><td class="num">0.45</td></tr>
+        <tr><td>retrieval / e2e (mean)</td><td class="num">11.1%</td><td class="num">31.3%</td></tr>
+        <tr><td>tool 시간 (median)</td><td class="num">1,202 ms</td><td class="num">6,276 ms</td></tr>
+        <tr><td>EM / F1</td><td class="num">36.0 / 44.7%</td><td class="num">30.9 / 41.9%</td></tr>
+      </tbody>
+    </table>
+    <p class="metric-cap"><b>해석</b>: rerank(BAAI/bge-reranker-base, MPS)가 검색을 <b>정당하게</b>(인위적 지연이 아니라 실제 cross-encoder 연산으로)
+      무겁게 만들어 <b>decode-only 기준 1:1을 거의 정확히 달성</b>(1.08)했다. LLM-total(prefill 포함) 기준으론 0.45로 아직 절반.
+      <span class="warn">⚠️ EM/F1 열은 <b>표본이 달라(rerank n=139 vs 비-rerank n=50)</b> 정확도 직접 비교가 아니다 — 같은 첫 50문항 기준일 때는 거의 불변이었다. 이 섹션의 핵심 결과는 정확도가 아니라 <b>hop 비율을 1:1로 맞춘 것</b>이며, 표본 139개로도 1.08로 견고하다(hop n=628). candidate_k를 50→45 근처로 줄이면 1.0에 더 정확히 맞출 수 있다.</span></p>
+  </section>
+
+  <section>
+    <div class="callout blue">
+      <span class="lab">decode-RAG 연구에의 함의</span>
+      ① retrieval-time fraction을 <b>bracket</b>: Live Wikipedia <b>~45%</b>(상한·비재현) ↔ dense-only <b>~11%</b>(하한·재현 가능),
+      그리고 <b>현재 = dense+rerank로 그 사이 ~31%</b>를 재현 가능하게 만들어 <b>논문 tool share 30%대와 일치</b>시켰다(n=139).
+      이 ~31%가 decode 중 retrieval prefetch/overlap으로 숨길 수 있는 지연이며, ⑦에서 hop별 retrieval≈decode(1:1)까지 맞췄다.
+      ⑤·⑥의 heavy-tail·decode-우세 형상도 논문과 일치 → 패턴 수준 재현 확인. <b>다음 단계는 decode-RAG 기법 자체의 구현·측정.</b>
+    </div>
+  </section>
+
+  <footer>
+    생성 2026-06-08 · ⑦ rerank 139문항으로 갱신 2026-06-09 · 브랜치 <code>experiment/react-vectordb</code><br>
+    그래프 생성: <code>repro/analysis/plot_three_way_compare.py</code> (①~⑥, 1차·현재 12장) ·
+    <code>repro/analysis/plot_hop_balance.py</code> (⑦ hop 균형 3장) ·
+    논문 원본: <code>figures/fig{4,5,6,7,13}.png</code><br>
+    데이터: <code>repro/results/raw/fig13_pareto.jsonl</code> (1차, react) ·
+    <code>repro/results/raw/react_vectordb.jsonl</code> (현재 ①~⑥, n=50) ·
+    <code>repro/results/raw/react_vectordb_rerank.jsonl</code> (⑦ rerank, n=139)
+  </footer>
+
+</div>
+</body>
+</html>

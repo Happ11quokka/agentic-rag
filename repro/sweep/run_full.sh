@@ -14,6 +14,13 @@ source .venv/bin/activate
 export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-dummy-local}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8000/v1}"
 
+# faiss-cpu and torch each bundle their own libomp; on macOS that triggers
+# "OMP: Error #15 ... libomp already initialized" and an abort/segfault on the
+# first reranked query. Setting this in the ENV (before python starts) is far
+# more reliable than the in-module os.environ.setdefault, which can run after a
+# libomp is already loaded. Required for the rerank (cross-encoder) path.
+export KMP_DUPLICATE_LIB_OK=TRUE
+
 CONFIG="$1"
 CACHE_MODE="${2:-default}"   # "default" (cache OFF) or "cache_on"
 # Use venv Python (system Python doesn't have PyYAML installed)

@@ -1,0 +1,18 @@
+run_id: react_vectordb_rerank   # SAME id as the 50-sample run → --resume reuses those 50 rows
+workload: hotpotqa
+agent_type: react
+defaults:
+  fewshot: 5
+  iteration_limit: 30
+  retrieval_backend: vectordb
+  embed_model: embed-multilingual-v3.0
+  index_path: /Users/imdonghyeon/agentic_rag/repro/retrieval/index/cohere_hotpot.faiss
+  meta_path: /Users/imdonghyeon/agentic_rag/repro/retrieval/index/cohere_hotpot_meta.parquet
+  top_k: 5
+  rerank_model: BAAI/bge-reranker-base   # local cross-encoder (MPS), 1.1GB 1-time download
+  candidate_k: 50                        # FAISS fetches 50, rerank down to top_k=5
+sweeps:
+  iteration_limit: [30]
+samples_per_cell: 7405      # full HotpotQA dev-fullwiki (shuffle=False → sample_idx 0..7404)
+sample_seed: 42
+notes: "Full-dataset (7,405) rerank baseline. Identical config to react_vectordb_rerank.yaml except sample count, so the existing 50 rows (sample_idx 0-49) carry over under --resume. Embed calls retry on transient errors; sweep aborts cleanly after a failure streak (API quota)."

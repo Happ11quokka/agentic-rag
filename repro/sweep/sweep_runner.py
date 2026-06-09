@@ -86,6 +86,14 @@ def run_sweep(cfg: dict, *, out_path: str, resume: bool = True,
         skipped = before - len(cells)
         print(f"[resume] skipping {skipped}/{before} cells already done", file=sys.stderr)
 
+    # Circuit breaker: after this many consecutive failed queries (e.g. the
+    # Cohere monthly quota is exhausted, or llama-server died), stop cleanly
+    # instead of burning through the rest of the dataset writing error rows.
+    # All completed-good rows are already fsync'd, so --resume picks up exactly
+    # where we stopped. 0 disables. Tune via REPRO_FAIL_STREAK_ABORT (default 8).
+    fail_streak_abort = int(os.environ.get("REPRO_FAIL_STREAK_ABORT", "8"))
+    consecutive_failures = 0
+
     collector = _start_collector(base_url=base_url)
     try:
         for i, cell in enumerate(cells):
@@ -95,6 +103,19 @@ def run_sweep(cfg: dict, *, out_path: str, resume: bool = True,
             trace = run_one_for_cell(cell, collector)
             trace.run_id = cfg.get("run_id", "")
             append_jsonl_fsync(out_path, trace)
+
+            meta = getattr(trace, "meta", None) or {}
+            if meta.get("timeout") or meta.get("error"):
+                consecutive_failures += 1
+                if fail_streak_abort and consecutive_failures >= fail_streak_abort:
+                    print(f"[circuit-breaker] {consecutive_failures} consecutive "
+                          f"failures — stopping. Likely the API quota is exhausted "
+                          f"or the server is down. Re-run with --resume to continue "
+                          f"(run cleanup_failed.sh first to retry the failed rows).",
+                          file=sys.stderr, flush=True)
+                    break
+            else:
+                consecutive_failures = 0
     finally:
         collector.stop()
 

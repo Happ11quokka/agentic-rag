@@ -34,7 +34,8 @@ class QueryTrace(BaseModel):
     sample_idx: int
 
     # Outcome
-    correct: bool
+    correct: bool          # EM — exact match (1/0)
+    f1: float = 0.0        # token-level F1 — partial credit [0, 1]
     final_answer: str
     expected_answer: str
 

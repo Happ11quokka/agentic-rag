@@ -1,11 +1,13 @@
-# Reproduction outputs
+# Large / regeneratable artifacts (rebuilt via setup scripts — see README §5)
 repro/models/*.gguf
-repro/results/raw/*.jsonl
-repro/results/aggregated/*.csv
-repro/results/figures/*.png
-
-# Dense retrieval index artifacts (large; rebuilt by build_cohere_hotpot_index.py)
 repro/retrieval/index/
+
+# Runtime noise: backups, server logs, pid files
+repro/results/raw/pre_*_backup/
+repro/results/sweep_logs/
+*.pid
+*.log
+trace.txt
 
 # Secrets (never commit API keys)
 .env
@@ -18,14 +20,13 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# AgentBench clone
+# Third-party AgentBench clone — NOT committed; restored via repro/patches/agentbench.patch
+# applied on https://github.com/VIA-Research/AgentBench.git @ ef5b195f6 (see README §5)
 AgentBench/
 
-# llama.cpp build artifacts
+# llama.cpp source + build artifacts
 repro/setup/llama.cpp.src/
 repro/setup/llama.cpp.build/
 
-# Misc
+# OS
 .DS_Store
-*.log
-trace.txt

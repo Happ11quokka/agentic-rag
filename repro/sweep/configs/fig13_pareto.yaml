@@ -4,7 +4,7 @@ agent_types: [react, reflexion, lats, llmcompiler]
 samples_per_agent:
   react: 50
   reflexion: 50
-  lats: 25
+  lats: 3           # capped to existing 3 — LATS too slow on M3 Pro Q4 (avg 17min, worst case 40min+ timeout)
   llmcompiler: 50
 defaults:
   fewshot: 5

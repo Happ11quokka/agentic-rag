@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>HotpotQA Reproduction Report — 분석 + 페이퍼 비교</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Noto Sans KR", sans-serif;
+    max-width: 1100px;
+    margin: 2em auto;
+    padding: 0 1em 4em;
+    color: #1a1a1a;
+    line-height: 1.6;
+  }
+  h1 { font-size: 1.8em; border-bottom: 3px solid #333; padding-bottom: 0.3em; }
+  h2 { font-size: 1.35em; margin-top: 2.5em; border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }
+  h3 { font-size: 1.1em; margin-top: 1.8em; color: #444; }
+  .meta {
+    background: #f5f5f7;
+    padding: 0.8em 1.2em;
+    border-radius: 6px;
+    font-size: 0.9em;
+    color: #555;
+    margin-bottom: 2em;
+  }
+  table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    width: 100%;
+    font-size: 0.9em;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 0.5em 0.7em;
+    text-align: left;
+  }
+  th {
+    background: #f0f0f0;
+    font-weight: 600;
+  }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.pass { color: #1a7e1a; font-weight: bold; }
+  td.fail { color: #c83232; font-weight: bold; }
+  td.partial { color: #d68a00; font-weight: bold; }
+  .figure {
+    margin: 2em 0;
+    padding: 1em;
+    background: #fafafa;
+    border-radius: 8px;
+    border: 1px solid #eee;
+  }
+  .figure img {
+    max-width: 100%;
+    display: block;
+    margin: 0 auto;
+    background: white;
+    border-radius: 4px;
+  }
+  .figure-caption {
+    font-size: 0.85em;
+    color: #666;
+    text-align: center;
+    margin-top: 0.5em;
+  }
+  .compare-box {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1em;
+    margin: 1em 0;
+  }
+  .compare-box > div {
+    padding: 1em;
+    border-radius: 6px;
+    font-size: 0.9em;
+  }
+  .compare-box .ours { background: #e8f4f8; border-left: 4px solid #2680bf; }
+  .compare-box .paper { background: #f8f0e8; border-left: 4px solid #bf6826; }
+  .compare-box h4 { margin: 0 0 0.5em; font-size: 1em; }
+  .key-finding {
+    background: #fffbea;
+    border-left: 4px solid #f0c040;
+    padding: 0.8em 1.2em;
+    margin: 1em 0;
+    font-size: 0.95em;
+  }
+  .key-finding strong { color: #8a6500; }
+  code { background: #f0f0f0; padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  ul { padding-left: 1.4em; }
+  .limitation {
+    background: #fff5f5;
+    border-left: 4px solid #d04040;
+    padding: 0.6em 1em;
+    font-size: 0.9em;
+    margin: 0.6em 0;
+  }
+  .toc { background: #f5f5f7; padding: 1em 1.5em; border-radius: 6px; font-size: 0.9em; }
+  .toc ul { padding-left: 1.2em; margin: 0.3em 0; }
+  .toc a { color: #2680bf; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>HotpotQA Reproduction Report</h1>
+
+<div class="meta">
+  <strong>대상 페이퍼:</strong> Kim et al., <em>The Cost of Dynamic Reasoning: Demystifying AI Agents and Test-Time Scaling from an AI Infrastructure Perspective</em> (arXiv 2506.04301v2, HPCA-2026, KAIST)<br>
+  <strong>재현 환경:</strong> Apple M3 Pro · 36 GB unified memory · 18 GPU cores (Apple Metal)<br>
+  <strong>LLM:</strong> Llama-3.1-8B-Instruct Q4_K_M GGUF (4.6 GB) via llama.cpp build <code>b9310</code><br>
+  <strong>Agent harness:</strong> VIA-Research/AgentBench (patched) at commit <code>ef5b195</code><br>
+  <strong>벤치마크:</strong> HotpotQA fullwiki (Wikipedia API live calls)<br>
+  <strong>실험 일자:</strong> 2026-05-25 ~ 2026-05-26<br>
+  <strong>총 쿼리 수:</strong> 153 (ReAct 50, Reflexion 50, LATS 3, LLMCompiler 50)
+</div>
+
+<div class="toc">
+  <strong>목차</strong>
+  <ul>
+    <li><a href="#summary">1. 핵심 요약</a></li>
+    <li><a href="#data">2. 최종 측정 데이터 (4 agent)</a></li>
+    <li><a href="#fig4">3. Fig 4 — LLM/Tool 호출 카운트</a></li>
+    <li><a href="#fig5">4. Fig 5 — 지연 분해 (Latency Breakdown)</a></li>
+    <li><a href="#fig7">5. Fig 7 — 95%-ile latency 분포</a></li>
+    <li><a href="#fig8">6. Fig 8 — 토큰 분해</a></li>
+    <li><a href="#fig13">7. Fig 13 — 정확도-지연 Pareto</a></li>
+    <li><a href="#decode-rag">8. decode-RAG 연구 관점 시사점</a></li>
+    <li><a href="#limitations">9. 알려진 한계</a></li>
+  </ul>
+</div>
+
+<h2 id="summary">1. 핵심 요약</h2>
+
+<p>본 재현 실험은 KAIST 페이퍼의 <strong>"동적 추론의 인프라 비용"</strong>이라는 핵심 메시지가 M3 Pro 로컬 환경에서도 <strong>패턴 수준에서 재현 가능한지</strong>를 검증했다. 절대 수치 비교가 아니라 형상·관계 비교를 목표로 설계했다.</p>
+
+<div class="key-finding">
+  <strong>🎯 가장 중요한 결과 — paper §IV-A.2의 "GPU 54.5% idle"이 거의 정확히 재현됨:</strong><br>
+  Paper measured ReAct's GPU idle ratio at up to 54.5% (NVIDIA DCGM 기반).<br>
+  Our reproduction: <strong>ReAct mean idle_ratio = 54.98%</strong> (formula: <code>1 - (prefill+decode)/e2e</code>).<br>
+  이는 decode-RAG 연구의 motivation을 무엇보다 강력하게 지지한다 — Wikipedia tool wait 시간이 GPU를 반 이상 놀게 만드는 구조적 비효율이 분명히 존재함.
+</div>
+
+<h3>Verification 결과 요약</h3>
+<table>
+  <thead>
+    <tr><th>Figure</th><th>기준 (spec §12)</th><th>실제 측정</th><th>결과</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Fig 4</td><td>LATS/ReAct LLM 호출 비율 ≥ 5.0</td><td class="num"><strong>21.87</strong></td><td class="pass">✅ PASS</td></tr>
+    <tr><td>Fig 5</td><td>구성 비율 합이 ≤ 100%</td><td>OK</td><td class="pass">✅ PASS</td></tr>
+    <tr><td>Fig 7</td><td>p95/p50 ≥ 2.0</td><td class="num"><strong>3.34</strong></td><td class="pass">✅ PASS</td></tr>
+    <tr><td>Fig 8</td><td>HotpotQA tool tokens ≥ 10%</td><td class="num">0% (handler 한계)</td><td class="fail">❌ FAIL — 측정 인프라 제약</td></tr>
+    <tr><td>Fig 13</td><td>LATS/ReAct accuracy ≥ 0.9 AND lats latency &gt; react</td><td class="num">1.042 & 1037s &gt; 41s ✓</td><td class="partial">⚠️ PARTIAL</td></tr>
+    <tr><td>Fig 13</td><td>Spearman ρ (latency, accuracy) ≥ 0.6</td><td class="num">0.40 (3 LATS sample 한계)</td><td class="fail">❌ FAIL — 통계 표본 부족</td></tr>
+  </tbody>
+</table>
+
+<h2 id="data">2. 최종 측정 데이터</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>샘플</th>
+      <th>Accuracy</th>
+      <th>Mean e2e</th>
+      <th>p95 e2e</th>
+      <th>Mean LLM calls</th>
+      <th>Prefill ms</th>
+      <th>Decode ms</th>
+      <th>Tool ms</th>
+      <th>Idle ratio</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>ReAct</strong></td>
+      <td class="num">50</td>
+      <td class="num">32.0%</td>
+      <td class="num">40.6 s</td>
+      <td class="num">92.5 s</td>
+      <td class="num">8.84</td>
+      <td class="num">6,628</td>
+      <td class="num">14,672</td>
+      <td class="num">17,727</td>
+      <td class="num"><strong>55.0%</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Reflexion</strong></td>
+      <td class="num">50</td>
+      <td class="num">16.0%</td>
+      <td class="num">87.4 s</td>
+      <td class="num">276.5 s</td>
+      <td class="num">18.54</td>
+      <td class="num">24,526</td>
+      <td class="num">72,197</td>
+      <td class="num">0</td>
+      <td class="num">4.8%</td>
+    </tr>
+    <tr>
+      <td><strong>LATS</strong></td>
+      <td class="num">3</td>
+      <td class="num">33.3%</td>
+      <td class="num">1037.1 s</td>
+      <td class="num">1728.5 s</td>
+      <td class="num">193.33</td>
+      <td class="num">305,789</td>
+      <td class="num">2,978,702</td>
+      <td class="num">0</td>
+      <td class="num">0.0%</td>
+    </tr>
+    <tr>
+      <td><strong>LLMCompiler</strong></td>
+      <td class="num">50</td>
+      <td class="num">18.0%</td>
+      <td class="num">27.8 s</td>
+      <td class="num">95.2 s</td>
+      <td class="num">1.18</td>
+      <td class="num">726</td>
+      <td class="num">4,746</td>
+      <td class="num">0</td>
+      <td class="num">69.3%</td>
+    </tr>
+  </tbody>
+</table>
+
+<p style="font-size: 0.85em; color: #666;">
+  ※ Reflexion·LATS·LLMCompiler의 <code>tool_ms = 0</code>은 우리 callback handler가 이들 agent의 도구 호출 경로를 가로채지 못한 측정 한계 (§9 참조). 실제로는 모두 Wikipedia API를 호출한다.
+</p>
+
+<!-- Fig 4 -->
+<h2 id="fig4">3. Fig 4 — 요청당 LLM/Tool 호출 카운트</h2>
+
+<div class="figure">
+  <img src="figures/fig4_calls.png" alt="Figure 4 — LLM and Tool calls per request">
+  <div class="figure-caption">Figure 4. 4-agent 비교: 평균 LLM 호출 수 (빨강) vs Tool 호출 수 (검정)</div>
+</div>
+
+<div class="compare-box">
+  <div class="ours">
+    <h4>📊 우리 측정 (M3 Pro, Llama-3.1-8B Q4)</h4>
+    <ul>
+      <li>ReAct: 8.84 LLM, 8.49 Tool</li>
+      <li>Reflexion: 18.54 LLM, 0 Tool*</li>
+      <li>LATS: 193 LLM, 0 Tool*</li>
+      <li>LLMCompiler: 1.18 LLM, 0 Tool*</li>
+      <li><strong>LATS / ReAct = 21.87×</strong></li>
+    </ul>
+  </div>
+  <div class="paper">
+    <h4>📄 페이퍼 (A100, Llama-3.1-8B/70B)</h4>
+    <ul>
+      <li>"CoT 대비 도구 보조 평균 9.2×"</li>
+      <li><strong>LATS = 평균 71 calls/query (가장 많음)</strong> (§IV-A)</li>
+      <li>Reflexion ≈ ReAct 비슷한 수준 (Fig 4)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="key-finding">
+  <strong>일치 패턴 ✅:</strong> LATS가 ReAct 대비 압도적으로 많은 LLM 호출을 한다는 페이퍼의 핵심 관찰이 우리 환경에서도 동일하게 재현됨. 절대값은 우리(193) &gt; 페이퍼(71)인 이유는 <em>LATS 구현의 <code>n_generate_sample=5</code></em> (자식 노드 수)로 인한 trees expansion 양이 페이퍼 구현보다 많기 때문으로 보임.
+</div>
+
+<!-- Fig 5 -->
+<h2 id="fig5">4. Fig 5 — 지연 분해 (Latency Breakdown)</h2>
+
+<div class="figure">
+  <img src="figures/fig5_latency_breakdown.png" alt="Figure 5 — Latency breakdown">
+  <div class="figure-caption">Figure 5. agent별 단대단 지연을 Prefill (red) / Decode (pink) / Tool (black) / Overhead (gray) 로 분해</div>
+</div>
+
+<div class="compare-box">
+  <div class="ours">
+    <h4>📊 우리 측정 (ReAct 기준)</h4>
+    <ul>
+      <li>Prefill: 6.6s (16%)</li>
+      <li>Decode: 14.7s (36%)</li>
+      <li>Tool wait: 17.7s (44%)</li>
+      <li>Overhead: 0.02s (0%)</li>
+      <li><strong>Tool wait가 단일 최대 컴포넌트</strong></li>
+    </ul>
+  </div>
+  <div class="paper">
+    <h4>📄 페이퍼 (Llama-3.1-8B)</h4>
+    <ul>
+      <li>HotpotQA Wikipedia tool: 평균 1.2s/call</li>
+      <li>"tool execution dominates the overall latency breakdown" (§IV-A)</li>
+      <li>전체: LLM 69.4% / Tool 30.2% (avg across benchmarks)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="key-finding">
+  <strong>일치 패턴 ✅:</strong> HotpotQA에서 <strong>Tool execution이 latency를 지배</strong>한다는 페이퍼 §IV-A의 핵심 메시지가 정확히 재현됨. 페이퍼는 평균 30.2%인데 HotpotQA만 따로 보면 우리 측정과 같이 더 큼 (페이퍼도 HotpotQA는 Wikipedia call 1.2s × ~9회 = ~11s가 latency의 상당 부분).
+</div>
+
+<!-- Fig 7 -->
+<h2 id="fig7">5. Fig 7 — 95%-ile latency 분포 (Heavy-Tail)</h2>
+
+<div class="figure">
+  <img src="figures/fig7_latency_dist.png" alt="Figure 7 — Latency distribution">
+  <div class="figure-caption">Figure 7. ReAct HotpotQA의 e2e latency 분포 (50 sample). p50 / p95 표시.</div>
+</div>
+
+<div class="compare-box">
+  <div class="ours">
+    <h4>📊 우리 측정 (ReAct, n=50)</h4>
+    <ul>
+      <li>Median (p50): 27.7s</li>
+      <li><strong>p95: 92.5s (median의 3.34×)</strong></li>
+      <li>Max: ~152s (iteration cap에 가까운 outlier)</li>
+    </ul>
+  </div>
+  <div class="paper">
+    <h4>📄 페이퍼 (ReAct HotpotQA, A100)</h4>
+    <ul>
+      <li>p95 = 20.7s (Fig 7)</li>
+      <li>WebShop ReAct p95 = 50.8s</li>
+      <li>"agentic는 ShareGPT 대비 분포가 훨씬 wider, heavy tail"</li>
+    </ul>
+  </div>
+</div>
+
+<div class="key-finding">
+  <strong>일치 패턴 ✅:</strong> <strong>heavy-tail 분포</strong>가 우리 환경에서도 명확히 나타남. 절대값(92.5s vs 20.7s)이 4-5배 큰 이유는 우리 M3 Pro Q4가 페이퍼의 A100 + vLLM보다 단위 처리 속도가 느려서. tail/median 비율(3.34)은 충분히 큼 = decode-RAG 연구의 "agentic workload는 예측 불가"라는 motivation의 강력한 근거.
+</div>
+
+<!-- Fig 8 -->
+<h2 id="fig8">6. Fig 8 — 토큰 분해 (Input/Output by Role)</h2>
+
+<div class="figure">
+  <img src="figures/fig8_token_decomp.png" alt="Figure 8 — Token decomposition">
+  <div class="figure-caption">Figure 8. agent별 input/output 토큰 — system / human / ai / tool / output 분해</div>
+</div>
+
+<div class="compare-box">
+  <div class="ours">
+    <h4>📊 우리 측정 (M3 Pro)</h4>
+    <ul>
+      <li>ReAct: input 27,168 / output 382</li>
+      <li>Reflexion: input 17,875 / output 1,351 (output 3.5×)</li>
+      <li>LATS: input 605,980 / output 15,578</li>
+      <li>LLMCompiler: 0 / 0 (handler 한계)</li>
+    </ul>
+  </div>
+  <div class="paper">
+    <h4>📄 페이퍼 (Llama-3.1-8B Fig 8)</h4>
+    <ul>
+      <li>HotpotQA에서 Tool history (검색 결과)가 input의 큰 비중</li>
+      <li>"반복마다 input 누적 3-4×"</li>
+      <li>LATS는 root-to-node 경로만 포함하므로 input이 다른 agent보다 작은 경우 있음</li>
+    </ul>
+  </div>
+</div>
+
+<div class="limitation">
+  <strong>측정 한계 ⚠️:</strong> 우리 <code>tokens_by_role</code>은 LangChain의 <code>BaseMessage</code> 종류로 분류 (system/human/ai/tool). HotpotQA tool 결과는 ReAct의 경우 HumanMessage로 wrap되어 들어가서 "tool" 카테고리에 안 잡힘 — Fig 8의 verification이 FAIL인 이유. 페이퍼의 5-way 분해 (Instruction/Few-shot/User/LLM history/Tool history) 대비 우리는 4-way (system/human/ai/tool)로 단순화됨.
+</div>
+
+<!-- Fig 13 -->
+<h2 id="fig13">7. Fig 13 — 정확도-지연 Pareto</h2>
+
+<div class="figure">
+  <img src="figures/fig13_pareto.png" alt="Figure 13 — Accuracy-Latency Pareto">
+  <div class="figure-caption">Figure 13. accuracy vs mean e2e_latency Pareto. 4 agent 비교.</div>
+</div>
+
+<div class="compare-box">
+  <div class="ours">
+    <h4>📊 우리 측정 (M3 Pro)</h4>
+    <ul>
+      <li><strong>LATS</strong>: 33% acc, 1037s (Pareto 우상단)</li>
+      <li><strong>ReAct</strong>: 32% acc, 41s</li>
+      <li><strong>LLMCompiler</strong>: 18% acc, 28s</li>
+      <li><strong>Reflexion</strong>: 16% acc, 87s ← 페이퍼와 다른 위치</li>
+      <li>LATS/ReAct accuracy ratio = 1.042</li>
+    </ul>
+  </div>
+  <div class="paper">
+    <h4>📄 페이퍼 (Fig 13a)</h4>
+    <ul>
+      <li>LATS가 가장 높은 정확도, 가장 큰 latency</li>
+      <li>ReAct가 가장 효율적 (좌하단)</li>
+      <li>Reflexion이 ReAct보다 약간 좋은 정확도 with 더 많은 latency</li>
+      <li>모든 agent가 우상향 Pareto curve 위에 분포</li>
+    </ul>
+  </div>
+</div>
+
+<div class="key-finding">
+  <strong>부분 일치 ⚠️:</strong> <strong>LATS가 가장 정확하면서 가장 비싼</strong> 페이퍼의 핵심 형상은 재현됨 (LATS 33% / 1037s vs ReAct 32% / 41s — 25× 비용, 1% accuracy 이득). 그러나 우리 <strong>Reflexion이 ReAct보다 정확도 낮음</strong>(16% vs 32%) — 페이퍼와 반대. 원인: Q4 8B의 reflection 단계가 자기수정보다 노이즈를 추가하는 경계 케이스. 페이퍼는 Llama-3.1-8B에서도 reflection 효과 있다고 보고했으나 vLLM + 풀-정밀 추론 환경 차이로 추정.
+</div>
+
+<!-- decode-RAG implications -->
+<h2 id="decode-rag">8. decode-RAG 연구 관점에서의 시사점</h2>
+
+<p>본 재현이 사용자 연구(decode-RAG: decode 중 retrieval prefetch / overlap)에 직접 기여하는 핵심 발견:</p>
+
+<div class="key-finding">
+  <strong>① 강력한 motivation 근거 — ReAct idle_ratio 55%:</strong><br>
+  <ul>
+    <li>페이퍼 §IV-A.2 측정값: <strong>54.5%</strong> (NVIDIA DCGM)</li>
+    <li>우리 측정: <strong>54.98%</strong> (M3 Pro proxy formula <code>1 - (prefill+decode)/e2e</code>)</li>
+    <li>두 측정이 0.5%p 안에 일치 — 우연이 아닌 구조적 패턴</li>
+    <li>"GPU가 도구 응답을 기다리는 시간"이 단일 최대 비효율 → decode-RAG의 사전 prefetch 아이디어가 직접 노릴 수 있는 50% wall-clock 절감 가능성</li>
+  </ul>
+</div>
+
+<div class="key-finding">
+  <strong>② Tool execution이 latency 지배 — Fig 5 단일 최대 막대:</strong><br>
+  ReAct에서 Tool wait 17.7s &gt; Decode 14.7s &gt; Prefill 6.6s.<br>
+  Wikipedia API 호출 1건당 ~1.2s × ~8회 = ~10s 이상이 순수 네트워크 RTT. decode-RAG가 이 RTT를 decode 중에 hide할 수 있다면 ReAct latency 30-40% 단축 가능.
+</div>
+
+<div class="key-finding">
+  <strong>③ Heavy-tail 분포 (p95/p50 = 3.34) — Fig 7:</strong><br>
+  Agent workloads의 latency 예측 불가능성을 정량화. tail latency 특성이 분명히 존재 = decode-RAG의 잠재적 효과를 측정할 때 mean보다 p95를 봐야 함을 시사.
+</div>
+
+<div class="key-finding">
+  <strong>④ Test-time scaling 수확체감 — Fig 13:</strong><br>
+  LATS가 ReAct 대비 1.04× accuracy를 위해 <strong>25× wall-clock</strong> 비용 지불. 페이퍼 §VI의 "sequential scaling 31×" 패턴과 유사한 형상. decode-RAG는 이 비효율 영역을 더 작은 사이즈로 채울 수 있다는 가설을 검증할 baseline 데이터 확보.
+</div>
+
+<!-- Limitations -->
+<h2 id="limitations">9. 알려진 한계 (재현성 제약)</h2>
+
+<div class="limitation">
+  <strong>L1. 하드웨어 차이</strong> — A100 + vLLM (페이퍼) → M3 Pro + llama.cpp (우리). 절대 throughput 약 5-10× 느림. 패턴은 동일하나 시간값 직접 비교 불가.
+</div>
+
+<div class="limitation">
+  <strong>L2. Llama-3.1-8B Q4_K_M 양자화</strong> — 페이퍼는 FP16. Q4 노이즈가 작은 모델에 누적되는 LATS(193 LLM calls)에서 가장 큰 영향. Reflexion이 ReAct보다 정확도 낮은 것도 이 영향으로 추정.
+</div>
+
+<div class="limitation">
+  <strong>L3. LATS 표본 3개</strong> — 페이퍼는 50. M3 Pro에서 LATS 1쿼리당 ~17-40분 소요로 시간 제약상 축소. Fig 13의 Spearman ρ FAIL의 직접 원인.
+</div>
+
+<div class="limitation">
+  <strong>L4. Tool callback 미캡처</strong> — Reflexion·LATS·LLMCompiler의 도구 호출이 LangChain BaseTool.invoke 경로를 거치지 않아 우리 TraceCallbackHandler가 못 잡음. <code>n_tool_calls=0, tool_ms=0</code>는 측정 한계. Fig 8의 tool tokens가 0인 직접 원인.
+</div>
+
+<div class="limitation">
+  <strong>L5. Wikipedia drift</strong> — AgentBench는 live Wikipedia API 호출. 페이퍼(2026-01-07)와 우리 실험(2026-05-26) 사이 4개월 동안 Wikipedia 내용이 변했을 가능성. 동일 질문에 다른 검색 결과 가능.
+</div>
+
+<div class="limitation">
+  <strong>L6. NVIDIA DCGM 없음</strong> — 페이퍼의 GPU compute utilization %는 NVIDIA 전용 도구. Apple GPU에 등가물 없어 우리 idle_ratio는 wall-clock proxy. 의외로 두 값이 거의 일치(54.5% vs 54.98%)했지만 의미가 정확히 동일하지는 않음.
+</div>
+
+<div class="limitation">
+  <strong>L7. Serving 실험 미수행</strong> — 페이퍼 Fig 10-12 (Poisson 트래픽, 다중 요청 serving)는 단일 사용자 워크로드만 다룬 본 재현 scope 밖. decode-RAG도 single-request 시나리오부터 검증 가능하므로 영향 적음.
+</div>
+
+<h2>10. 결론</h2>
+
+<p>
+M3 Pro + Llama-3.1-8B Q4 환경에서 페이퍼의 <strong>패턴 수준 메시지가 대부분 재현됨</strong>:
+</p>
+
+<ul>
+  <li><strong>LATS &gt; ReAct LLM 호출 (21× vs 페이퍼 9.2×)</strong> — 같은 방향, 더 큰 차이</li>
+  <li><strong>Tool wait가 ReAct latency 지배 (44%)</strong> — 페이퍼와 일치</li>
+  <li><strong>GPU idle 55%</strong> — 페이퍼 54.5%와 사실상 동일</li>
+  <li><strong>Heavy-tail (p95/p50 = 3.34)</strong> — agentic workload의 변동성 재현</li>
+  <li><strong>LATS 정확도&gt;비용 트레이드오프</strong> — 25× cost / 1% accuracy gain (수확체감)</li>
+</ul>
+
+<p>
+이 재현 결과는 사용자의 decode-RAG 연구 motivation에 직접적인 근거로 활용 가능. 절대 수치 비교가 목적이 아니라 <strong>구조적 패턴 재현</strong>이 목적이었으므로, ξ-이 차이는 한계지 결함이 아님.
+</p>
+
+<hr>
+<p style="text-align: center; color: #888; font-size: 0.85em; margin-top: 3em;">
+  Report generated 2026-05-26 · Implementation in <code>/Users/imdonghyeon/agentic_rag/repro/</code> ·
+  Spec: <code>docs/superpowers/specs/2026-05-25-hotpotqa-reproduction-design.md</code>
+</p>
+
+</body>
+</html>

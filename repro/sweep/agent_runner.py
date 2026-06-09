@@ -69,7 +69,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from contextvars import copy_context
 
 from measurement.chat_wrapper import TRACE, TraceCallbackHandler
-from measurement.eval import hotpotqa_em
+from measurement.eval import hotpotqa_em, hotpotqa_f1
 from measurement.metrics_collector import MetricsCollector, PollSample
 from measurement.trace_schema import QueryTrace
 
@@ -255,6 +255,7 @@ def run_one(
     qt.e2e_latency_s = t_end - t_start
     qt.final_answer = extract_final_answer(agent_type, result)
     qt.correct = hotpotqa_em(qt.final_answer, qt.expected_answer)
+    qt.f1 = hotpotqa_f1(qt.final_answer, qt.expected_answer)
 
     finalize_trace(qt, collector.slice(t_start, t_end))
     return qt

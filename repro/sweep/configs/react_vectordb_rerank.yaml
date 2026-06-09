@@ -1,0 +1,18 @@
+run_id: react_vectordb_rerank   # separate JSONL → preserves react_vectordb
+workload: hotpotqa
+agent_type: react
+defaults:
+  fewshot: 5
+  iteration_limit: 30
+  retrieval_backend: vectordb
+  embed_model: embed-multilingual-v3.0
+  index_path: /Users/imdonghyeon/agentic_rag/repro/retrieval/index/cohere_hotpot.faiss
+  meta_path: /Users/imdonghyeon/agentic_rag/repro/retrieval/index/cohere_hotpot_meta.parquet
+  top_k: 5
+  rerank_model: BAAI/bge-reranker-base   # local cross-encoder (MPS), 1.1GB 1-time download
+  candidate_k: 50                        # FAISS fetches 50, rerank down to top_k=5
+sweeps:
+  iteration_limit: [30]
+samples_per_cell: 50
+sample_seed: 42
+notes: "embedding stays Cohere API (index unchanged); rerank added locally to raise per-hop retrieval time toward decode."

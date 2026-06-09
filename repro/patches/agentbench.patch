@@ -1,0 +1,795 @@
+diff --git a/config.yaml b/config.yaml
+index 6f13b47..4739a1d 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -1,13 +1,13 @@
+ # config.yaml
+ global:
+-  model: "Qwen/Qwen3-32B" 
+-  host: localhost
+-  port: 8000  
+-  temperature: 0.0                        
+-  samples: 5                                # Number of query samples to test the agent on
+-  shuffle: true                             # Shuffle the test samples  
+-  save_trace: true     
+-  trace_path: "./trace.txt"                 # Path to save the traces                
++  model: "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
++  host: 127.0.0.1
++  port: 8000
++  temperature: 0.0
++  samples: 1                # OUR sweep_runner drives the outer loop
++  shuffle: false            # See deterministic_select.patch (Task 9)
++  save_trace: true
++  trace_path: "./trace.txt"
+   webshop_url: "http://localhost:3000"
+ 
+ agents:
+diff --git a/run_lats.py b/run_lats.py
+index e6a5493..1db701c 100644
+--- a/run_lats.py
++++ b/run_lats.py
+@@ -30,6 +30,78 @@ def _get_attr(args: Any, name: str, default: Any) -> Any:
+     return getattr(args, name, default)
+ 
+ 
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run LATS on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): in-context examples.
++            iteration_limit (int): MCTS iterations.
++            max_depth (int): tree max depth.
++            n_generate_sample (int): branching factor (children per expand).
++            sampling_temperature (float): node sampling temperature.
++            callbacks (list[BaseCallbackHandler] | None).
++            model (str), base_url (str | None), temperature (float),
++            print_log (bool).
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 0))
++    iteration_limit = int(agent_kwargs.get("iteration_limit", 30))
++    max_depth = int(agent_kwargs.get("max_depth", 7))
++    n_generate_sample = int(agent_kwargs.get("n_generate_sample", 5))
++    sampling_temperature = float(agent_kwargs.get("sampling_temperature", 1.0))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    base_url = agent_kwargs.get("base_url")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    client = OpenAIChatClient(
++        model=model_name,
++        base_url=base_url,
++        temperature=temperature,
++    )
++    # Inject max_tokens=2048, timeout=600, and callbacks into the underlying ChatOpenAI.
++    bind_kwargs: Dict[str, Any] = {"max_tokens": 2048, "timeout": 600}
++    bound = client.llm.bind(**bind_kwargs)
++    if callbacks:
++        bound = bound.with_config({"callbacks": callbacks})
++    client.llm = bound
++
++    env = HotpotWikiEnv()
++    task = HotpotQATask(client=client, fewshot=fewshot)
++    config = HotpotLATSConfig(
++        iterations=iteration_limit,
++        n_generate_sample=n_generate_sample,
++        max_depth=max_depth,
++        sampling_temperature=sampling_temperature,
++        print_log=print_log,
++    )
++    runner = HotpotLATSRunner(env=env, task=task, client=client, config=config)
++
++    question = sample["question"]
++    label = sample.get("answer", "")
++    result = runner.run(question=question, answer=label)
++
++    best_node = result.get("best_node")
++    try:
++        from measurement.chat_wrapper import TRACE
++        trace_obj = TRACE.get()
++        # Use depth as a proxy for expansions on the winning path; fall back to iteration_limit.
++        trace_obj.n_tree_expansions = int(getattr(best_node, "depth", iteration_limit) or iteration_limit)
++    except (LookupError, ImportError):
++        pass
++
++    return {
++        "answer": result.get("output", ""),
++        "raw_messages": [],
++        "iterations": int(getattr(best_node, "depth", 0) or 0),
++    }
++
++
+ def main(args: Any) -> None:
+     if args.workload not in ["hotpotqa", "webshop", "humaneval", "math"]:
+         raise NotImplementedError(
+diff --git a/run_llmcompiler.py b/run_llmcompiler.py
+index 1fc38c7..0293eed 100644
+--- a/run_llmcompiler.py
++++ b/run_llmcompiler.py
+@@ -103,6 +103,106 @@ async def run_agent(args, agent, question, label=None, evaluator=None):
+ 
+ 
+ 
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run LLMCompiler on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): in-context examples.
++            iteration_limit (int): unused (kept for uniformity).
++            max_replan (int): max plan/execute/join cycles.
++            max_chat_history (int): replan context window size.
++            callbacks (list[BaseCallbackHandler] | None).
++            model (str), host (str | None), port (int | None),
++            temperature (float), print_log (bool).
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    from src.agents.LLMCompiler.configs.hotpotqa.tools import tools as hotpot_tools, clear_pages
++    from src.agents.LLMCompiler.configs.hotpotqa.prompt import (
++        get_output_prompt,
++        get_planner_prompt,
++    )
++
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 1))
++    max_replan = int(agent_kwargs.get("max_replan", 10))
++    max_chat_history = int(agent_kwargs.get("max_chat_history", 10))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    host = agent_kwargs.get("host")
++    port = agent_kwargs.get("port")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    output_prompt = get_output_prompt(fewshot)
++    planner_prompt = get_planner_prompt(fewshot)
++
++    def _make_llm():
++        # Construct ChatOpenAI directly so we can pass `callbacks` via constructor.
++        # The planner patches preserve these (see planner.py:242 patch).
++        # Wall-clock timeout enforced by run_one watchdog, not per-call.
++        from langchain_openai import ChatOpenAI
++        base_url = f"http://{host}:{port}/v1" if host else None
++        return ChatOpenAI(
++            base_url=base_url,
++            model=model_name,
++            temperature=temperature,
++            max_retries=1,
++            max_tokens=2048,
++            callbacks=callbacks if callbacks else None,
++        )
++
++    llm = _make_llm()
++    planner_llm = _make_llm()
++
++    agent = LLMCompiler(
++        tools=hotpot_tools,
++        planner_llm=planner_llm,
++        planner_example_prompt=planner_prompt,
++        planner_example_prompt_replan=planner_prompt + "\nConsidering the previous plans and observations, please plan for the next steps.",
++        planner_stop=[END_OF_PLAN],
++        planner_stream=True,
++        agent_llm=llm,
++        joinner_prompt=output_prompt,
++        joinner_prompt_final=output_prompt + f"\nThis is the last trial, please think carefully and answer with {JOINNER_FINISH}(answer).",
++        max_replans=max_replan,
++        end_condition=None,
++        max_chat_history=max_chat_history,
++        print_log=print_log,
++    )
++
++    question = sample["question"]
++
++    try:
++        loop = asyncio.get_event_loop()
++        if loop.is_running():
++            raise RuntimeError("event loop already running")
++    except RuntimeError:
++        loop = asyncio.new_event_loop()
++        asyncio.set_event_loop(loop)
++
++    try:
++        raw_answer = loop.run_until_complete(agent.arun(question, callbacks=callbacks if callbacks else None))
++    except Exception as e:
++        raw_answer = f"Error: {e}"
++
++    try:
++        clear_pages()
++    except Exception:
++        pass
++
++    output = parse_answer(raw_answer) if raw_answer else ""
++    iterations = int(getattr(agent, "current_iter", 0) or 0) + 1
++
++    return {
++        "answer": output,
++        "raw_messages": [],
++        "iterations": iterations,
++    }
++
++
+ async def main(args):
+     print_log = bool(getattr(args, "print_log", False))
+     if args.workload not in ["hotpotqa", "webshop"]:
+diff --git a/run_react.py b/run_react.py
+index d695b98..1be67de 100644
+--- a/run_react.py
++++ b/run_react.py
+@@ -11,6 +11,104 @@ from langsmith import traceable, trace
+ 
+ load_dotenv()
+ 
++
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run ReAct on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): number of in-context examples (capped at 5).
++            iteration_limit (int): max graph recursion steps.
++            callbacks (list[BaseCallbackHandler] | None): LangChain callbacks.
++            model (str): model name.
++            base_url (str | None): OpenAI-compatible endpoint URL.
++            temperature (float): sampling temperature.
++            print_log (bool): verbose log.
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    from src.tools.hotpotqa_tools.wikipedia import FinishTool
++
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 0))
++    iteration_limit = int(agent_kwargs.get("iteration_limit", 30))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    base_url = agent_kwargs.get("base_url")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++    retrieval_backend = agent_kwargs.get("retrieval_backend", "wikipedia")
++
++    model = ChatOpenAI(
++        model=model_name,
++        base_url=base_url,
++        stream_usage=True,
++        stop="\nObservation:",
++        temperature=temperature,
++        max_tokens=2048,
++        timeout=600,
++        callbacks=callbacks if callbacks else None,
++    )
++
++    if retrieval_backend in ("vectordb", "cohere_faiss"):
++        # Dense retrieval over Cohere's precomputed Wikipedia embeddings (FAISS).
++        # tools = [search, finish]; no `lookup` (no "current page" in passage search).
++        from src.tools.hotpotqa_tools.vector_search import make_vector_search_tool
++        from src.agents.ReAct.prompt.hotpotqa_vectordb import get_system_prompt
++        search = make_vector_search_tool(
++            index_path=agent_kwargs["index_path"],
++            meta_path=agent_kwargs["meta_path"],
++            model=agent_kwargs.get("embed_model", "embed-multilingual-v3.0"),
++            top_k=int(agent_kwargs.get("top_k", 5)),
++            rerank_model=agent_kwargs.get("rerank_model", ""),
++            candidate_k=int(agent_kwargs.get("candidate_k", 0)),
++        )
++        tools = [search, FinishTool(name="finish")]
++    else:
++        # Original live-Wikipedia keyword search path.
++        from src.tools.hotpotqa_tools.wikipedia import WikipediaTool, LookupTool
++        from src.agents.ReAct.prompt.hotpotqa import get_system_prompt
++        tools = [WikipediaTool(name="search"), LookupTool(name="lookup"), FinishTool(name="finish")]
++
++    system_prompt = get_system_prompt(fewshots=min(fewshot, 5))
++    langgraph_agent_executor = create_react_agent(model, tools=tools, print_log=print_log)
++
++    question = sample["question"]
++    messages = [("system", system_prompt), ("human", question)]
++
++    final_chunk = None
++    iterations = 0
++    raw_messages = []
++    try:
++        for num, chunk in enumerate(
++            langgraph_agent_executor.stream(
++                {"messages": messages},
++                stream_mode="values",
++                config={
++                    "recursion_limit": iteration_limit,
++                    "callbacks": callbacks if callbacks else None,
++                },
++            )
++        ):
++            final_chunk = chunk
++            iterations = num + 1
++    except GraphRecursionError:
++        pass
++
++    if final_chunk is not None and final_chunk.get("messages"):
++        raw_messages = final_chunk["messages"]
++        answer = parse_answer(final_chunk["messages"][-1].content)
++    else:
++        answer = ""
++
++    return {
++        "answer": answer,
++        "raw_messages": raw_messages,
++        "iterations": iterations,
++    }
++
++
+ def main(args):
+     print_log = bool(getattr(args, "print_log", False))
+     if args.host:
+diff --git a/run_reflexion.py b/run_reflexion.py
+index 3868a34..d8a4800 100644
+--- a/run_reflexion.py
++++ b/run_reflexion.py
+@@ -11,6 +11,102 @@ from dotenv import load_dotenv
+ 
+ load_dotenv()
+ 
++
++def run_single_query(sample: dict, agent_kwargs: dict) -> dict:
++    """Run Reflexion on one HotpotQA sample.
++
++    Args:
++        sample: HotpotQA dataset entry with 'question' and 'answer'.
++        agent_kwargs:
++            fewshot (int): number of in-context examples.
++            iteration_limit (int): per-trial max steps.
++            reflection_limit (int): max number of trials (outer loop).
++            context_limit (int): scratchpad token cap.
++            callbacks (list[BaseCallbackHandler] | None).
++            model (str), base_url (str | None), temperature (float),
++            print_log (bool).
++
++    Returns:
++        dict with keys: answer, raw_messages, iterations.
++    """
++    from src.tools.hotpotqa_tools.wikipedia import LookupTool, WikipediaTool, FinishTool
++    from src.utils import get_evaluation_function
++
++    callbacks = agent_kwargs.get("callbacks") or []
++    fewshot = int(agent_kwargs.get("fewshot", 0))
++    iteration_limit = int(agent_kwargs.get("iteration_limit", 7))
++    reflection_limit = int(agent_kwargs.get("reflection_limit", 3))
++    context_limit = int(agent_kwargs.get("context_limit", 4096))
++    model_name = agent_kwargs.get("model", "Meta-Llama-3.1-8B-Instruct-Q4_K_M")
++    base_url = agent_kwargs.get("base_url")
++    temperature = float(agent_kwargs.get("temperature", 0.0))
++    print_log = bool(agent_kwargs.get("print_log", False))
++
++    llm = ChatOpenAI(
++        model=model_name,
++        base_url=base_url,
++        stream_usage=True,
++        temperature=temperature,
++        max_tokens=2048,
++        timeout=600,
++        callbacks=callbacks if callbacks else None,
++    )
++
++    tools = [WikipediaTool(name="search"), LookupTool(name="lookup"), FinishTool(name="finish")]
++    action_prompt = get_action_prompt("hotpotqa")
++    reflection_prompt = get_reflection_prompt("hotpotqa")
++    action_examples = get_action_examples("hotpotqa", fewshot)
++    reflection_examples = get_reflection_examples("hotpotqa", fewshot)
++    evaluator = get_evaluation_function("hotpotqa")
++
++    agent = ReflexionAgent(
++        actor_llm=llm,
++        actor_prompt=action_prompt,
++        actor_examples=action_examples,
++        reflect_llm=llm,
++        reflect_prompt=reflection_prompt,
++        reflect_examples=reflection_examples,
++        tools=tools,
++        context_limit=context_limit,
++        workload="hotpotqa",
++        max_steps=iteration_limit,
++        evaluator=evaluator,
++        print_log=print_log,
++    )
++
++    question = sample["question"]
++    label = sample.get("answer", "")
++    agent.set_qa(question)
++
++    output = ""
++    total_iterations = 0
++    for trial in range(reflection_limit):
++        try:
++            ispass, _ = agent.evaluator(output, label)
++            if ispass:
++                break
++            # Each non-first trial triggers a reflection inside agent.run()
++            # (agent.run() calls self.reflect() before re-running).
++            if trial > 0:
++                try:
++                    from measurement.chat_wrapper import TRACE
++                    trace_obj = TRACE.get()
++                    trace_obj.n_reflections += 1
++                except (LookupError, ImportError):
++                    pass
++            output = agent.run()
++            total_iterations += getattr(agent, "step_n", 0)
++        except KeyboardInterrupt:
++            raise
++        except Exception as e:
++            output = f"Error: {e}"
++
++    return {
++        "answer": output,
++        "raw_messages": list(getattr(agent, "scratchpad_list", [])),
++        "iterations": total_iterations,
++    }
++
+ def get_tools(args):
+     if args.workload == "hotpotqa":
+         from src.tools.hotpotqa_tools.wikipedia import LookupTool, WikipediaTool, FinishTool
+diff --git a/src/agents/LLMCompiler/planner.py b/src/agents/LLMCompiler/planner.py
+index 182449e..bdcdc9d 100644
+--- a/src/agents/LLMCompiler/planner.py
++++ b/src/agents/LLMCompiler/planner.py
+@@ -239,7 +239,10 @@ class Planner:
+                 ("human", human_prompt+"Please generate Plan here: "),
+             ]
+         llm_response = None
+-        self.llm.callbacks = callbacks
++        # Preserve any pre-existing callbacks (e.g., measurement TraceCallbackHandler
++        # passed via ChatOpenAI constructor) instead of overwriting them.
++        existing = list(self.llm.callbacks or [])
++        self.llm.callbacks = list(callbacks or []) + existing
+         async for chunk in self.llm.astream(messages, stop=self.stop,):
+             if not llm_response:
+                 llm_response = chunk
+diff --git a/src/agents/ReAct/prompt/hotpotqa_vectordb.py b/src/agents/ReAct/prompt/hotpotqa_vectordb.py
+new file mode 100644
+index 0000000..ca4bcf2
+--- /dev/null
++++ b/src/agents/ReAct/prompt/hotpotqa_vectordb.py
+@@ -0,0 +1,98 @@
++def get_system_prompt(fewshots: int) -> str:
++    """ReAct system prompt for HotpotQA over a dense vector store.
++
++    Mirrors ``prompt/hotpotqa.py`` but is written for passage-level dense
++    retrieval: there is no ``lookup`` tool and no "Could not find ... Similar"
++    behaviour. Each ``search`` returns the most relevant Wikipedia passages by
++    meaning, and the agent refines its query or searches again when needed.
++    """
++    hotpotqa_instruction_react = """
++Solve a question answering task with interleaving Thought and Action steps. Here are some guidelines:
++- You answer with a Thought and an Action, then you will be given the corresponding Observation of the action.
++- Use one tool at a time.
++- Action search[query] retrieves the most relevant Wikipedia passages for the query by meaning (dense retrieval). Each Observation contains one or more passages, each shown as "Title: <title>" followed by the passage text.
++- Refer to these passages to answer the question. If the passages are not relevant, search again with a different or more specific query.
++- This task is multi-hop: you usually need several searches to gather all the facts before you can answer.
++- Action finish[answer] returns your final short answer.
++- You MUST NEVER say in your thought that you don't know the answer.
++- You MUST NEVER say 'Observation:' in your response. Observation will be given from an external source.
++
++Answer MUST NEVER be 'unclear', 'unknown', 'neither', 'unrelated' or 'undetermined', and otherwise you will be PENALIZED.
++Answer should be short and concise. **Answers CANNOT be multiple choice or a sentence.**
++For example:
++yes/no or name of person/object, etc.
++
++Here are some examples:
++"""
++    examples = ["""
++Question: What is the elevation range for the area that the eastern sector of the Colorado orogeny extends into?
++Thought: I need to find what area the eastern sector of the Colorado orogeny extends into, then find that area's elevation range.
++Action: search[eastern sector of the Colorado orogeny extends into]
++Observation: Title: Colorado orogeny
++The Colorado orogeny was an episode of mountain building in Colorado and surrounding areas. The eastern sector extends into the High Plains and is called the Central Plains orogeny.
++
++Thought: The eastern sector extends into the High Plains. Now I need the elevation range of the High Plains.
++Action: search[High Plains United States elevation range]
++Observation: Title: High Plains (United States)
++The High Plains are a subregion of the Great Plains. From east to west, the High Plains rise in elevation from around 1,800 to 7,000 ft (550 to 2,130 m).
++
++Thought: The High Plains rise in elevation from around 1,800 to 7,000 ft, so the answer is 1,800 to 7,000 ft.
++Action: finish[1,800 to 7,000 ft]
++Answer: 1,800 to 7,000 ft
++""",
++        """
++Question: Musician and satirist Allie Goertz wrote a song about the "The Simpsons" character Milhouse, who Matt Groening named after who?
++Thought: I need to find who Matt Groening named the Simpsons character Milhouse after.
++Action: search[Simpsons character Milhouse named after]
++Observation: Title: Milhouse Van Houten
++Milhouse Mussolini Van Houten is a recurring character in the Fox animated television series The Simpsons, created by Matt Groening. Milhouse was named after U.S. president Richard Nixon, whose middle name was Milhous.
++
++Thought: Milhouse was named after U.S. president Richard Nixon, so the answer is Richard Nixon.
++Action: finish[Richard Nixon]
++Answer: Richard Nixon
++""",
++        """
++Question: Which documentary is about Finnish rock groups, Adam Clayton Powell or The Saimaa Gesture?
++Thought: I need to find which of these is a documentary about Finnish rock groups, so I search for them.
++Action: search[The Saimaa Gesture documentary Finnish rock groups]
++Observation: Title: The Saimaa Gesture
++The Saimaa Gesture is a 1981 Finnish documentary film by Aki and Mika Kaurismaki about three Finnish rock groups touring around Lake Saimaa.
++
++Thought: The Saimaa Gesture is a documentary about Finnish rock groups, so the answer is The Saimaa Gesture.
++Action: finish[The Saimaa Gesture]
++Answer: The Saimaa Gesture
++""",
++        """
++Question: What profession does Nicholas Ray and Elia Kazan have in common?
++Thought: I need to find the professions of Nicholas Ray and Elia Kazan, then find the profession they have in common.
++Action: search[Nicholas Ray film director profession]
++Observation: Title: Nicholas Ray
++Nicholas Ray was an American film director, screenwriter, and actor best known for the 1955 film Rebel Without a Cause.
++
++Thought: Nicholas Ray is a director, screenwriter, and actor. Now I need Elia Kazan's professions.
++Action: search[Elia Kazan profession]
++Observation: Title: Elia Kazan
++Elia Kazan was an American film and theatre director, producer, screenwriter and actor.
++
++Thought: Nicholas Ray and Elia Kazan were both director, screenwriter, and actor. So the professions in common are director, screenwriter, actor.
++Action: finish[director, screenwriter, actor]
++Answer: director, screenwriter, actor
++""",
++        """
++Question: Which magazine was started first Arthur's Magazine or First for Women?
++Thought: I need to find when Arthur's Magazine and First for Women were started, then compare.
++Action: search[Arthur's Magazine founded year]
++Observation: Title: Arthur's Magazine
++Arthur's Magazine (1844-1846) was an American literary periodical published in Philadelphia in the 19th century.
++
++Thought: Arthur's Magazine started in 1844. Now I need when First for Women started.
++Action: search[First for Women magazine founded year]
++Observation: Title: First for Women
++First for Women is a woman's magazine published by Bauer Media Group in the USA. The magazine was started in 1989.
++
++Thought: Arthur's Magazine started in 1844 and First for Women in 1989. 1844 < 1989, so Arthur's Magazine was started first.
++Action: finish[Arthur's Magazine]
++Answer: Arthur's Magazine
++"""
++    ]
++    return hotpotqa_instruction_react + "\n".join(examples[:fewshots]) + "Answer wirh\nThought: \nAnswer: "
+diff --git a/src/tools/hotpotqa_tools/vector_search.py b/src/tools/hotpotqa_tools/vector_search.py
+new file mode 100644
+index 0000000..045f07e
+--- /dev/null
++++ b/src/tools/hotpotqa_tools/vector_search.py
+@@ -0,0 +1,210 @@
++"""Dense vector search tool for HotpotQA ReAct (Cohere embeddings + FAISS).
++
++Drop-in replacement for the live-Wikipedia ``search`` tool. It keeps the same
++tool name (``search``) and the standard ``BaseTool.invoke`` path so the sweep's
++``TraceCallbackHandler`` captures the call (and its latency) unchanged. The
++backend is a local FAISS index over Cohere's precomputed Wikipedia-2023-11
++passage embeddings; the query is embedded at runtime via the Cohere API
++(``embed-multilingual-v3.0``, ``input_type="search_query"``) so it lives in the
++same vector space as the documents. The Cohere API round-trip is intentionally
++inside the tool span — that network latency is the retrieval cost we measure.
++"""
++import os
++import time
++from typing import Any
++
++# --- Embed-call resilience (full-dataset sweeps over an unstable network) ---
++# A 7,405-query sweep makes ~34k Cohere embed calls over many hours, so transient
++# network blips or short rate-limit windows are expected. We retry with
++# exponential backoff so a brief outage does NOT fail the query (it would
++# otherwise become an error row that --resume has to re-run). A hard monthly
++# quota (HTTP 429 that never clears) survives all retries and re-raises — the
++# sweep_runner circuit breaker then stops the run cleanly. Tune via env:
++#   REPRO_EMBED_MAX_RETRIES (default 6), REPRO_EMBED_BACKOFF_BASE secs (default 2)
++_EMBED_MAX_RETRIES = int(os.environ.get("REPRO_EMBED_MAX_RETRIES", "6"))
++_EMBED_BACKOFF_BASE = float(os.environ.get("REPRO_EMBED_BACKOFF_BASE", "2"))
++
++
++def _is_rate_limit(exc: Exception) -> bool:
++    """Best-effort detection of a 429 / quota error across cohere SDK versions."""
++    name = type(exc).__name__.lower()
++    msg = str(exc).lower()
++    return (
++        "toomanyrequests" in name
++        or "ratelimit" in name
++        or "429" in msg
++        or "rate limit" in msg
++        or "too many requests" in msg
++        or "quota" in msg
++    )
++
++# faiss and torch both bundle libomp on macOS; loading torch FIRST (before faiss
++# is imported in get_retriever) avoids the duplicate-OpenMP abort/segfault that
++# otherwise crashes the sweep on the first reranked query.
++os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
++try:
++    import torch  # noqa: F401
++except Exception:
++    pass
++
++from langchain_core.tools import BaseTool
++
++# Process-wide singleton: one sweep process answers many queries, so the FAISS
++# index + aligned metadata + Cohere client are loaded once and reused.
++_CACHE: dict = {}
++
++_DOC_CHAR_LIMIT = 1200  # truncate each passage body in the observation
++
++
++def get_retriever(index_path: str, meta_path: str,
++                  model: str = "embed-multilingual-v3.0", top_k: int = 5) -> dict:
++    """Load (and cache) the FAISS index, aligned metadata, and Cohere client."""
++    key = (os.path.abspath(index_path), model)
++    if key not in _CACHE:
++        import faiss
++        import cohere
++        import pandas as pd
++        index = faiss.read_index(index_path)
++        # CRITICAL: pin faiss to ONE thread. The agent runs in a worker thread
++        # while MetricsCollector polls llama-server from another; faiss's default
++        # multi-threaded OMP search then races the second bundled libomp (faiss's
++        # vs torch's) and SEGFAULTs inside index.search() — even with
++        # KMP_DUPLICATE_LIB_OK=TRUE. Single-threaded search spawns no OMP workers,
++        # so the clash disappears. Cost is negligible (one query vs an IndexFlatIP;
++        # ~0.1-0.2s) and it keeps retrieval timing stable across the full sweep.
++        faiss.omp_set_num_threads(1)
++        meta = pd.read_parquet(meta_path).to_dict("records")
++        if index.ntotal != len(meta):
++            raise ValueError(
++                f"index/meta length mismatch: index has {index.ntotal} vectors "
++                f"but metadata has {len(meta)} rows"
++            )
++        client = cohere.Client(os.environ["COHERE_API_KEY"])
++        _CACHE[key] = {
++            "index": index, "meta": meta, "client": client,
++            "model": model, "top_k": int(top_k),
++        }
++    return _CACHE[key]
++
++
++def _embed_query(client, model: str, query: str):
++    """Embed one query string; return a (1, dim) float32 array.
++
++    Cohere SDK v7 returns embeddings as an ``EmbedByTypeResponseEmbeddings``
++    object (``.float_``) when ``embedding_types`` is given, but older/other code
++    paths return a plain list — handle both defensively.
++    """
++    import numpy as np
++    resp = None
++    last_exc = None
++    for attempt in range(_EMBED_MAX_RETRIES + 1):
++        try:
++            resp = client.embed(
++                texts=[query], model=model,
++                input_type="search_query", embedding_types=["float"],
++            )
++            break
++        except Exception as exc:  # network blip, 429, 5xx — retry with backoff
++            last_exc = exc
++            if attempt == _EMBED_MAX_RETRIES:
++                raise
++            # Rate-limit windows clear slower than network blips → back off harder.
++            mult = 4 if _is_rate_limit(exc) else 1
++            wait = _EMBED_BACKOFF_BASE * (2 ** attempt) * mult
++            print(f"[embed retry {attempt + 1}/{_EMBED_MAX_RETRIES}] "
++                  f"{type(exc).__name__}: {str(exc)[:120]} — sleeping {wait:.0f}s",
++                  flush=True)
++            time.sleep(wait)
++    emb = resp.embeddings
++    vec = getattr(emb, "float_", None)
++    if vec is None:
++        vec = getattr(emb, "float", None)
++    if vec is None:
++        vec = emb
++    return np.asarray(vec[0], dtype=np.float32).reshape(1, -1)
++
++
++# Process-wide singleton for the local cross-encoder reranker. Loaded once and
++# reused across queries; runs on Apple MPS when available, else CPU.
++_RERANK_CACHE: dict = {}
++
++
++def _get_reranker(model_name: str) -> dict:
++    """Load (and cache) a local cross-encoder reranker (transformers)."""
++    if model_name not in _RERANK_CACHE:
++        import torch
++        from transformers import AutoModelForSequenceClassification, AutoTokenizer
++        tok = AutoTokenizer.from_pretrained(model_name)
++        model = AutoModelForSequenceClassification.from_pretrained(model_name)
++        model.eval()
++        device = "mps" if torch.backends.mps.is_available() else "cpu"
++        model.to(device)
++        _RERANK_CACHE[model_name] = {"tok": tok, "model": model, "device": device}
++    return _RERANK_CACHE[model_name]
++
++
++class VectorSearchTool(BaseTool):
++    name: str = "search"
++    description: str = "Search Wikipedia passages by meaning and return the most relevant ones."
++    index_path: str
++    meta_path: str
++    embed_model: str = "embed-multilingual-v3.0"
++    top_k: int = 5
++    rerank_model: str = ""   # "" = no rerank (dense top_k only)
++    candidate_k: int = 0     # FAISS fetches this many before rerank (0 -> top_k)
++
++    def _run(self, text: str, _: Any = None) -> str:
++        import faiss
++        r = get_retriever(self.index_path, self.meta_path, self.embed_model, self.top_k)
++        q = _embed_query(r["client"], r["model"], str(text))
++        faiss.normalize_L2(q)  # documents are L2-normalized at build time -> IP == cosine
++        meta = r["meta"]
++        # With rerank: fetch candidate_k from FAISS, then cross-encoder down to top_k.
++        use_rerank = bool(self.rerank_model) and self.candidate_k > r["top_k"]
++        k = self.candidate_k if use_rerank else r["top_k"]
++        scores, idxs = r["index"].search(q, k)
++        cand = [int(i) for i in idxs[0] if int(i) >= 0]
++        if use_rerank and cand:
++            bodies = [str(meta[i].get("text", "")).strip() for i in cand]
++            order = self._rerank(str(text), bodies)
++            cand = [cand[j] for j in order[:r["top_k"]]]
++        else:
++            cand = cand[:r["top_k"]]
++        passages = []
++        for i in cand:
++            row = meta[i]
++            title = str(row.get("title", "")).strip()
++            body = str(row.get("text", "")).strip()
++            if len(body) > _DOC_CHAR_LIMIT:
++                body = body[:_DOC_CHAR_LIMIT].rstrip() + " ..."
++            passages.append(f"Title: {title}\n{body}")
++        return "\n\n".join(passages) if passages else "No passages found."
++
++    def _rerank(self, query: str, candidates: list) -> list:
++        """Cross-encoder rerank: return indices into `candidates`, best first."""
++        import torch
++        rr = _get_reranker(self.rerank_model)
++        pairs = [[query, c] for c in candidates]
++        with torch.no_grad():
++            inputs = rr["tok"](pairs, padding=True, truncation=True,
++                               return_tensors="pt", max_length=512).to(rr["device"])
++            logits = rr["model"](**inputs).logits.view(-1).float()
++        return torch.argsort(logits, descending=True).tolist()
++
++    async def _arun(self, text: str, _: Any = None) -> str:
++        return self._run(text)
++
++
++def make_vector_search_tool(index_path: str, meta_path: str,
++                            model: str = "embed-multilingual-v3.0",
++                            top_k: int = 5,
++                            rerank_model: str = "",
++                            candidate_k: int = 0) -> VectorSearchTool:
++    """Build the search tool, warming the singleton so bad paths fail fast."""
++    get_retriever(index_path, meta_path, model, top_k)
++    return VectorSearchTool(
++        index_path=index_path, meta_path=meta_path,
++        embed_model=model, top_k=int(top_k),
++        rerank_model=rerank_model or "",
++        candidate_k=int(candidate_k or 0),
++    )
+diff --git a/src/utils.py b/src/utils.py
+index 0ca42ed..0f156da 100644
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -65,10 +65,17 @@ def load_dataset(workload: str, shuffle: bool = False):
+         print(f"Error loading dataset file {dataset_path}: {e}")
+         return []
+ 
++    seed = int(os.environ.get("REPRO_SAMPLE_SEED", "42"))
+     if shuffle:
+         print("Shuffling dataset...")
+         random.shuffle(data)
+-            
++    else:
++        # Deterministic: shuffle a list of indices with seeded RNG, then reorder
++        rng = random.Random(seed)
++        indices = list(range(len(data)))
++        rng.shuffle(indices)
++        data = [data[i] for i in indices]
++
+     return data
+ 
+ from src.tools.hotpotqa_tools.hotpot_evaluate import evaluate_hotpotqa

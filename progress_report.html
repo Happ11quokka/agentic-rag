@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>decode-RAG 연구 — 진행 상황 보고</title>
+<style>
+  :root{
+    --bg:#0d0f14; --bg2:#161922; --bg3:#1a2030; --line:#2a2f3d;
+    --tx:#e8e8ea; --tx2:#b8c2db; --tx3:#8693b3;
+    --blue:#2c5cff; --blue2:#6ea8ff; --green:#5ae0a3; --amber:#ffa45e; --red:#ff7575;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:64px}
+  body{
+    background:var(--bg); color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Noto Sans KR","Apple SD Gothic Neo",sans-serif;
+    font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  .progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--blue),var(--green));z-index:200;width:0}
+
+  /* ---- top nav ---- */
+  nav{
+    position:sticky;top:0;z-index:100;
+    background:rgba(13,15,20,.86);backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:.2rem;padding:.7rem 4vw;flex-wrap:wrap;
+  }
+  nav .brand{font-weight:700;color:#fff;margin-right:auto;font-size:.95rem;letter-spacing:-.01em}
+  nav .brand b{color:var(--blue2)}
+  nav a{color:var(--tx2);text-decoration:none;font-size:.83rem;padding:.3rem .7rem;border-radius:999px;transition:.15s}
+  nav a:hover{background:var(--bg2);color:#fff}
+
+  .wrap{max-width:1120px;margin:0 auto;padding:0 4vw}
+  section{padding:4.5rem 0 1rem}
+  section:first-of-type{padding-top:2.5rem}
+
+  h2.sec{font-size:1.9rem;font-weight:700;color:#fff;letter-spacing:-.02em;display:flex;align-items:baseline;gap:.7rem}
+  h2.sec .part{font-size:.72rem;font-weight:700;color:var(--blue2);letter-spacing:.18em;background:rgba(44,92,255,.14);padding:.28em .7em;border-radius:999px}
+  h2.sec + .lead{color:var(--tx2);margin:.7rem 0 1.6rem;font-size:1.05rem;max-width:820px}
+  h3{color:#fff;font-size:1.18rem;margin:1.8rem 0 .8rem;font-weight:650;letter-spacing:-.01em}
+  h4{color:#fff;font-size:1rem;margin:1.2rem 0 .5rem}
+  p{margin:.5rem 0;color:var(--tx)}
+  .muted{color:var(--tx3)}
+  strong{color:#fff}
+  ul{padding-left:1.25rem;margin:.5rem 0}
+  li{margin:.3rem 0}
+  code{background:#0a0c11;border:1px solid var(--line);border-radius:4px;padding:.05em .4em;font-size:.86em;color:#cdd6f0}
+  a.inl{color:var(--blue2)}
+
+  /* ---- hero ---- */
+  .hero{
+    background:radial-gradient(ellipse at 15% 0%,#1a2548 0%,#0d0f14 60%);
+    border-bottom:1px solid var(--line);padding:3.4rem 0 3rem;
+  }
+  .hero .eyebrow{color:var(--blue2);font-size:.8rem;letter-spacing:.2em;text-transform:uppercase;font-weight:700}
+  .hero h1{font-size:2.7rem;color:#fff;font-weight:800;letter-spacing:-.025em;margin:.5rem 0 .3rem;line-height:1.12}
+  .hero .sub{color:var(--tx2);font-size:1.15rem;max-width:760px}
+  .hero .meta{margin-top:1.3rem;display:flex;gap:1.4rem;flex-wrap:wrap;font-size:.85rem;color:var(--tx3)}
+  .hero .meta b{color:var(--tx)}
+
+  /* ---- pipeline ---- */
+  .pipe{display:grid;grid-template-columns:repeat(3,1fr) 1.1fr;gap:.8rem;margin:2rem 0 .5rem}
+  @media(max-width:780px){.pipe{grid-template-columns:1fr}}
+  .step{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:1.1rem 1.2rem;position:relative}
+  .step.done{border-color:rgba(90,224,163,.45)}
+  .step.next{border-color:rgba(255,164,94,.5);background:linear-gradient(135deg,#241d12,#161922)}
+  .step .tag{font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .step.done .tag{color:var(--green)}
+  .step.next .tag{color:var(--amber)}
+  .step .t{color:#fff;font-weight:650;margin:.35rem 0 .25rem;font-size:1.02rem}
+  .step .d{font-size:.84rem;color:var(--tx3);line-height:1.5}
+
+  /* ---- stat cards ---- */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin:1.4rem 0}
+  @media(max-width:780px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:linear-gradient(135deg,#1a2548 0%,#161922 100%);border:1px solid #2c5cff55;border-radius:12px;padding:1.3rem 1.3rem}
+  .stat .n{font-size:2rem;font-weight:800;color:var(--blue2);line-height:1;letter-spacing:-.02em}
+  .stat .n.green{color:var(--green)} .stat .n.amber{color:var(--amber)} .stat .n.red{color:var(--red)}
+  .stat .l{font-size:.85rem;color:var(--tx2);margin-top:.45rem;font-weight:600}
+  .stat .s{font-size:.76rem;color:var(--tx3);margin-top:.3rem;line-height:1.45}
+
+  /* ---- generic cards / columns ---- */
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:1.1rem;margin:1rem 0}
+  @media(max-width:780px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:1.2rem 1.4rem}
+  .card.paper{border-left:4px solid var(--blue2)}
+  .card.ours{border-left:4px solid var(--green)}
+  .card h4{margin-top:0}
+  .card.paper h4::before{content:"📄 "} .card.ours h4::before{content:"📊 "}
+  .card ul{margin:.3rem 0}
+  .card li{font-size:.92rem;color:var(--tx2)}
+
+  .agents{display:grid;grid-template-columns:repeat(5,1fr);gap:.7rem;margin:1rem 0}
+  @media(max-width:780px){.agents{grid-template-columns:repeat(2,1fr)}}
+  .agent{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:.8rem .9rem}
+  .agent .nm{color:#fff;font-weight:700;font-size:.95rem}
+  .agent .ds{font-size:.78rem;color:var(--tx3);margin-top:.2rem}
+
+  /* ---- callouts ---- */
+  .callout{border-radius:0 8px 8px 0;padding:1rem 1.3rem;margin:1.1rem 0;font-size:.93rem}
+  .callout .lab{font-weight:700;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;display:block;margin-bottom:.35rem}
+  .callout.blue{background:rgba(44,92,255,.1);border-left:4px solid var(--blue)} .callout.blue .lab{color:var(--blue2)}
+  .callout.green{background:rgba(90,224,163,.08);border-left:4px solid var(--green)} .callout.green .lab{color:var(--green)}
+  .callout.amber{background:rgba(255,164,94,.08);border-left:4px solid var(--amber)} .callout.amber .lab{color:var(--amber)}
+  .callout ul{margin:.3rem 0 0} .callout li{color:var(--tx2);font-size:.9rem}
+
+  /* ---- figures ---- */
+  .figgrid{display:grid;grid-template-columns:1fr 1fr;gap:1.1rem;margin:1.1rem 0}
+  @media(max-width:780px){.figgrid{grid-template-columns:1fr}}
+  figure{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:.8rem;overflow:hidden}
+  figure img{width:100%;height:auto;display:block;border-radius:6px;background:#fff}
+  figure.dark img{background:transparent}
+  figcaption{font-size:.78rem;color:var(--tx3);margin:.55rem .2rem 0;letter-spacing:.02em}
+  figcaption.paper{color:#aab8e0} figcaption.ours{color:var(--green)}
+  .fignote{font-size:.85rem;color:var(--tx2);margin:.2rem 0 0;padding-left:.1rem}
+
+  /* big single number (fig6) */
+  .bignum{background:linear-gradient(135deg,#16321f 0%,#161922 100%);border:1px solid #2ca02c66;border-radius:12px;padding:1.6rem;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center}
+  .bignum .v{font-size:3.4rem;font-weight:800;color:var(--green);line-height:1;letter-spacing:-.03em}
+  .bignum .c{margin-top:.5rem;color:var(--tx2);font-size:.95rem}
+  .bignum .delta{margin-top:.7rem;color:var(--green);font-weight:700;font-size:1.1rem}
+
+  /* ---- tables ---- */
+  .tbl{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem;background:var(--bg2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .tbl th,.tbl td{padding:.65rem .9rem;border-bottom:1px solid var(--line);text-align:left}
+  .tbl th{background:var(--bg3);color:var(--tx2);font-size:.78rem;letter-spacing:.04em;text-transform:uppercase;font-weight:700}
+  .tbl tr:last-child td{border-bottom:none}
+  .tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .tbl .pass{color:var(--green);font-weight:700} .tbl .partial{color:var(--amber);font-weight:700} .tbl .fail{color:var(--red);font-weight:700}
+  .tbl .hi{color:var(--green);font-weight:700}
+  .tbl col.k{width:30%}
+
+  /* arch diagram */
+  .arch{background:#0a0c11;border:1px solid var(--line);border-radius:12px;padding:1.2rem 1.4rem;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:.82rem;color:var(--tx2);overflow-x:auto;line-height:1.7;white-space:pre}
+
+  /* checklist */
+  .check{list-style:none;padding:0}
+  .check li{padding:.5rem 0 .5rem 2rem;position:relative;border-bottom:1px solid var(--line);color:var(--tx2)}
+  .check li:last-child{border-bottom:none}
+  .check li::before{position:absolute;left:0;top:.5rem;font-size:1rem}
+  .check li.ok::before{content:"✅"} .check li.now::before{content:"🔜"} .check li.idea::before{content:"○";color:var(--tx3);left:.3rem}
+  .check li b{color:#fff}
+
+  footer{border-top:1px solid var(--line);margin-top:4rem;padding:2.5rem 0 4rem;color:var(--tx3);font-size:.85rem}
+  footer a{color:var(--blue2)}
+  .pill{display:inline-block;font-size:.72rem;font-weight:700;padding:.2em .6em;border-radius:999px;vertical-align:middle;margin-left:.5em}
+  .pill.done{background:rgba(90,224,163,.16);color:var(--green)}
+  .pill.wip{background:rgba(255,164,94,.16);color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+
+<nav>
+  <div class="brand">decode-RAG 연구 · <b>진행 상황 보고</b></div>
+  <a href="#overview">한눈에</a>
+  <a href="#paper">논문</a>
+  <a href="#repro">기존 재현</a>
+  <a href="#current">현재 실험</a>
+  <a href="#future">종합·향후</a>
+</nav>
+
+<!-- ===================== HERO / 대시보드 ===================== -->
+<header class="hero" id="overview">
+  <div class="wrap">
+    <div class="eyebrow">Research Progress · 2026-06-07</div>
+    <h1>동적 추론의 비용 재현 →<br>decode-RAG baseline 측정</h1>
+    <p class="sub">논문(<i>The Cost of Dynamic Reasoning</i>, HPCA-2026)의 핵심 패턴을 로컬 환경에서 재현하고,
+       그 위에서 <strong>decode-RAG</strong>의 정량적 baseline — <strong>retrieval-time fraction</strong> — 을 측정한 진행 보고.</p>
+    <div class="meta">
+      <span><b>논문</b> arXiv 2506.04301v2 · KAIST</span>
+      <span><b>환경</b> Apple M3 Pro 36GB · llama.cpp · Llama-3.1-8B Q4_K_M</span>
+      <span><b>워크로드</b> HotpotQA fullwiki</span>
+      <span><b>브랜치</b> experiment/react-vectordb</span>
+    </div>
+
+    <div class="pipe">
+      <div class="step done"><span class="tag">Step 1 · 완료</span><div class="t">논문 분석</div><div class="d">5종 에이전트 인프라 비용 구조 해독. paper_analysis.md (한국어 803줄).</div></div>
+      <div class="step done"><span class="tag">Step 2 · 완료</span><div class="t">기존 재현</div><div class="d">Fig 4/5/6/7/8/13 재현. GPU idle 54.98%로 논문과 0.48%p 일치.</div></div>
+      <div class="step done"><span class="tag">Step 3 · 완료</span><div class="t">decode-RAG baseline</div><div class="d">ReAct × Cohere 벡터DB로 retrieval-time fraction을 재현 가능하게 측정.</div></div>
+      <div class="step next"><span class="tag">Step 4 · 다음</span><div class="t">decode-RAG 기법 구현·측정</div><div class="d">decode 중 retrieval prefetch/overlap 프로토타입으로 실제 지연 절감 검증.</div></div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="n green">54.98%</div><div class="l">ReAct GPU idle (재현)</div><div class="s">논문 54.5% 대비 Δ0.48%p — retrieval 대기가 곧 decode-RAG의 표적.</div></div>
+      <div class="stat"><div class="n amber">44.8% → 11.1%</div><div class="l">decode-RAG 비율 (tool/e2e)</div><div class="s">라이브 Wikipedia → Cohere 벡터DB. 재현 가능한 baseline 확보.</div></div>
+      <div class="stat"><div class="n">36.0%</div><div class="l">EM 정확도 (벡터DB)</div><div class="s">기존 라이브 Wikipedia ReAct 32.0%보다 +4%p. F1로는 44.7% vs 38.5%(+6.2%p).</div></div>
+      <div class="stat"><div class="n">415 ms</div><div class="l">검색당 시간 (벡터DB)</div><div class="s">Cohere API + FAISS 880K. 라이브 Wikipedia ~2,004ms의 1/5.</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ===================== PART 1 — 논문 ===================== -->
+<section id="paper" class="wrap">
+  <h2 class="sec"><span class="part">PART 1</span>논문 — 배경과 동기</h2>
+  <p class="lead">왜 "에이전트의 인프라 비용"을 측정하는가, 그리고 그것이 decode-RAG와 어떻게 연결되는가.</p>
+
+  <p><strong>The Cost of Dynamic Reasoning: Demystifying AI Agents and Test-Time Scaling from an AI Infrastructure Perspective</strong>
+  (Kim et al., KAIST, <a class="inl" href="https://arxiv.org/abs/2506.04301" target="_blank">arXiv 2506.04301v2</a>, HPCA-2026)는
+  AI 에이전트(plan → tool → observe → refine를 반복하는 LLM 시스템)의 인프라 비용을 처음으로 정량 측정한 <strong>시스템 측정 연구</strong>다.
+  핵심 질문: <em>"한 번에 답하는 정적 LLM 대비, 동적 추론 에이전트는 인프라 측면에서 얼마나 더 비싸고, 그만큼 정확도가 오르는가?"</em></p>
+
+  <h3>벤치마크 대상 — 5종 에이전트</h3>
+  <div class="agents">
+    <div class="agent"><div class="nm">CoT</div><div class="ds">순수 추론, 도구 없음 (baseline)</div></div>
+    <div class="agent"><div class="nm">ReAct</div><div class="ds">추론+도구 (think→act→observe 반복)</div></div>
+    <div class="agent"><div class="nm">Reflexion</div><div class="ds">ReAct + 자기반성 단계</div></div>
+    <div class="agent"><div class="nm">LATS</div><div class="ds">MCTS 트리 탐색 + 반성</div></div>
+    <div class="agent"><div class="nm">LLMCompiler</div><div class="ds">DAG 계획 + 비동기 병렬 도구</div></div>
+  </div>
+
+  <h3>논문의 핵심 충격 수치</h3>
+  <div class="stats">
+    <div class="stat"><div class="n red">62~136×</div><div class="l">쿼리당 GPU 에너지 폭증</div><div class="s">정적 1-turn LLM(ShareGPT) 대비. Reflexion 70B = 348 Wh/query.</div></div>
+    <div class="stat"><div class="n amber">최대 71×</div><div class="l">LLM 호출 폭증 (LATS)</div><div class="s">CoT 대비 평균 9.2×. 트리 자식 노드마다 별도 호출.</div></div>
+    <div class="stat"><div class="n green">54.5%</div><div class="l">GPU idle (ReAct HotpotQA)</div><div class="s">단일 요청 처리 중 GPU가 도구 응답을 기다리는 시간.</div></div>
+    <div class="stat"><div class="n amber">31×</div><div class="l">test-time scaling 한계 비용</div><div class="s">Reflexion: +4% 정확도가 8.7s → 269.5s로 비싸짐.</div></div>
+  </div>
+
+  <div class="callout blue">
+    <span class="lab">왜 이 논문이 decode-RAG의 출발점인가</span>
+    논문이 측정한 <strong>"GPU idle 54.5%"</strong>의 정체는 <strong>에이전트가 외부 도구(retrieval) 응답을 기다리며 GPU가 노는 시간</strong>이다.
+    즉 단일 요청 안에서 LLM↔도구의 순차 의존성 때문에 생기는 이 idle 구간이 바로
+    <strong>decode 중 retrieval를 미리 당겨와(prefetch/overlap) 숨길 수 있는 비효율</strong>이다.
+    본 연구의 측정 지표 <code>retrieval-time fraction = tool_total / e2e</code> 은 "그 idle를 얼마나 숨길 수 있는가"의 상한을 정량화한다.
+  </div>
+</section>
+
+<!-- ===================== PART 2 — 기존 재현 ===================== -->
+<section id="repro" class="wrap">
+  <h2 class="sec"><span class="part">PART 2</span>기존 재현 <span class="pill done">완료</span></h2>
+  <p class="lead">절대 수치(초·Wh)는 환경 격차로 비교 불가 → <strong>비율·분포·순위·트레이드오프 형상</strong>의 재현을 목표로 함. "패턴 수준에서 일치하는가?"</p>
+
+  <div class="cols">
+    <div class="card paper"><h4>논문 (KAIST · GCP)</h4>
+      <ul>
+        <li>GPU: NVIDIA A100 40GB ×1(8B) / ×8(70B)</li>
+        <li>Backend: vLLM 0.6.6 · FP16 · prefix cache on</li>
+        <li>벤치마크: HotpotQA·WebShop·MATH·HumanEval</li>
+      </ul>
+    </div>
+    <div class="card ours"><h4>우리 (M3 Pro · 로컬)</h4>
+      <ul>
+        <li>GPU: Apple M3 Pro 18-core (Metal, 36GB)</li>
+        <li>Backend: llama.cpp · <strong>Q4_K_M GGUF</strong> · cache off(기본)</li>
+        <li>벤치마크: <strong>HotpotQA만</strong> (decode-RAG에 가장 적합)</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>재현한 핵심 Figure (논문 vs 우리)</h3>
+  <div class="figgrid">
+    <figure><img src="figures/fig13.png" alt="paper fig13"><figcaption class="paper">📄 논문 — Fig 13 Accuracy vs Latency Pareto</figcaption></figure>
+    <figure><img src="repro/results/figures/fig13_pareto.png" alt="our fig13"><figcaption class="ours">📊 우리 — HotpotQA × 4 agent × 8B Q4</figcaption></figure>
+  </div>
+  <p class="fignote">LATS 가장 정확+가장 비쌈, LLMCompiler 가장 빠름 — 논문 형상 재현. (LATS 표본 3개 한계로 Spearman은 미달.)</p>
+
+  <div class="figgrid">
+    <figure><img src="figures/fig4.png" alt="paper fig4"><figcaption class="paper">📄 논문 — Fig 4 요청당 LLM·Tool 호출</figcaption></figure>
+    <figure><img src="repro/results/figures/fig4_calls.png" alt="our fig4"><figcaption class="ours">📊 우리 — LATS LLM 호출 폭증 재현</figcaption></figure>
+  </div>
+  <div class="figgrid">
+    <figure><img src="figures/fig7.png" alt="paper fig7"><figcaption class="paper">📄 논문 — Fig 7 단대단 지연 분포 (heavy tail)</figcaption></figure>
+    <figure><img src="repro/results/figures/fig7_latency_dist.png" alt="our fig7"><figcaption class="ours">📊 우리 — p95/p50 = 3.34 (heavy tail 재현)</figcaption></figure>
+  </div>
+
+  <h3>가장 강력한 검증 포인트 — Fig 6 GPU idle</h3>
+  <div class="cols">
+    <figure class="dark"><img src="figures/fig6.png" alt="paper fig6" style="background:#fff"><figcaption class="paper">📄 논문 — NVIDIA DCGM 직접 측정</figcaption></figure>
+    <div class="bignum">
+      <div class="v">54.98%</div>
+      <div class="c">우리 측정 (wall-clock proxy) · 논문값 54.5%</div>
+      <div class="delta">|Δ| = 0.48%p 일치</div>
+    </div>
+  </div>
+  <p class="fignote">측정 방식이 다른데도(DCGM vs wall-clock) 0.5%p 안에서 일치 — 우연이 아닌 구조적 패턴. 이 idle가 곧 decode-RAG의 표적.</p>
+
+  <h3>재현 검증 요약</h3>
+  <table class="tbl">
+    <colgroup><col class="k"><col><col><col></colgroup>
+    <thead><tr><th>Figure</th><th>검증 기준</th><th>실측</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td>Fig 4</td><td>LATS/ReAct LLM 호출 비 ≥ 5.0</td><td class="num">21.87</td><td class="pass">✅ PASS</td></tr>
+      <tr><td>Fig 5</td><td>구성 비율 합 ≤ 100%</td><td class="num">OK</td><td class="pass">✅ PASS</td></tr>
+      <tr><td>Fig 6</td><td>ReAct GPU idle ≈ 54.5%</td><td class="num hi">54.98%</td><td class="pass">✅ PASS (Δ0.48%p)</td></tr>
+      <tr><td>Fig 7</td><td>p95/p50 ≥ 2.0</td><td class="num">3.34</td><td class="pass">✅ PASS</td></tr>
+      <tr><td>Fig 13</td><td>LATS/ReAct acc ≥ 0.9 &amp; latency↑</td><td class="num">1.04 &amp; 1037s&gt;41s</td><td class="partial">⚠️ PARTIAL</td></tr>
+      <tr><td>Fig 13</td><td>Spearman ρ(lat,acc) ≥ 0.6</td><td class="num">0.40 (LATS n=3)</td><td class="fail">❌ FAIL</td></tr>
+      <tr><td>Fig 8</td><td>HotpotQA tool tokens ≥ 10%</td><td class="num">0%</td><td class="fail">❌ FAIL (handler 한계)</td></tr>
+    </tbody>
+  </table>
+  <p class="muted" style="font-size:.86rem">전체 발표 덱(31슬라이드)은 <code>presentation.html</code> 참고. → <strong>패턴 수준 재현 성공</strong>: GPU idle·LLM 호출 폭증·tool wait 지배·heavy tail·LATS 수확체감이 모두 같은 형상으로 나타남.</p>
+</section>
+
+<!-- ===================== PART 3 — 현재 실험 ===================== -->
+<section id="current" class="wrap">
+  <h2 class="sec"><span class="part">PART 3</span>현재 실험 — ReAct × Cohere 벡터DB <span class="pill done">완료</span></h2>
+  <p class="lead">decode-RAG의 정량 baseline을 위해, 기존 라이브 Wikipedia 검색을 <strong>고정·재현 가능한 Cohere 밀집 벡터DB</strong>로 교체하고
+     retrieval-time fraction을 측정.</p>
+
+  <h3>동기 — 왜 벡터DB baseline인가</h3>
+  <div class="cols">
+    <div class="card paper" style="border-left-color:var(--amber)"><h4 style="--x:0">기존 라이브 Wikipedia의 한계</h4>
+      <ul>
+        <li><strong>비재현성</strong>: 라이브 API는 콘텐츠가 시간에 따라 드리프트 (논문 2026-01 ↔ 우리 측정 사이 변동).</li>
+        <li><strong>네트워크 변동</strong>: 검색당 ~2s가 순수 네트워크 지연에 좌우 → 분리 측정 어려움.</li>
+      </ul>
+    </div>
+    <div class="card ours"><h4>Cohere 벡터DB가 주는 것</h4>
+      <ul>
+        <li><strong>고정 코퍼스</strong>: Cohere Wikipedia-2023-11 스냅샷 → 재현 가능.</li>
+        <li><strong>밀집 검색</strong>: 의미 기반 top-k. 키워드 검색보다 정확도↑.</li>
+        <li><strong>측정 가능한 비율</strong>: 검색이 표준 <code>BaseTool.invoke</code> 경로 → tool span 자동 캡처.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>실험 설계</h3>
+  <div class="arch">[오프라인 1회]  Cohere en 스트리밍 ──filter(title ∈ HotpotQA)──▶ passages(text, title, emb)
+                 ├─▶ FAISS IndexFlatIP(1024)  →  cohere_hotpot.faiss  (3.4 GB)
+                 └─▶ 정렬된 메타데이터          →  cohere_hotpot_meta.parquet
+
+[런타임/sweep]   ReAct ──search[q]──▶ Cohere embed(q) ──▶ FAISS top-k ──▶ top-k passages
+                 (LLM = 로컬 llama-server)      (네트워크)        (로컬)
+                 tool span = embed(API) + FAISS  →  tool_total_ms  →  decode-RAG 비율</div>
+  <p class="fignote">인덱스: <strong>880,777 passages · 60,682 titles · gold-title 커버리지 82.9%</strong> (11,421/13,783). 빌드 ~4.2h(415 샤드 스트리밍).
+     측정 경로는 기존 <code>TraceCallbackHandler</code> 재사용 — sweep 코드 무수정.</p>
+
+  <h3>결과 (풀 415-샤드, 50 샘플)</h3>
+  <div class="stats">
+    <div class="stat"><div class="n amber">9.7%<span style="font-size:.5em;color:var(--tx3)"> / mean 11.1%</span></div><div class="l">decode-RAG 비율 (median)</div><div class="s">범위 5.0–29.4%. tool 1.2s / e2e 10.5s (median).</div></div>
+    <div class="stat"><div class="n green">36.0%</div><div class="l">EM 정확도 (18/50)</div><div class="s">라이브 32.0%보다 +4%p. F1(부분점수)로는 44.7% vs 38.5%(+6.2%p).</div></div>
+    <div class="stat"><div class="n">4.96</div><div class="l">검색 횟수/쿼리 (mean)</div><div class="s">정답 평균 3.1회 · 오답 6.0회 (multi-hop).</div></div>
+    <div class="stat"><div class="n">415 ms</div><div class="l">검색당 시간</div><div class="s">Cohere API 네트워크 + FAISS 880K.</div></div>
+  </div>
+
+  <h3>비교 그래프 — 라이브 Wikipedia vs Cohere 벡터DB</h3>
+  <div class="figgrid">
+    <figure class="dark"><img src="repro/results/figures/decode_rag/decode_rag_ratio.png" alt="fig A"><figcaption class="ours">Fig A — decode-RAG 비율 (retrieval-time fraction)</figcaption></figure>
+    <figure class="dark"><img src="repro/results/figures/decode_rag/decode_rag_ratio_dist.png" alt="fig B"><figcaption class="ours">Fig B — 비율 분포 (쿼리별, n=50)</figcaption></figure>
+  </div>
+  <p class="fignote"><strong>핵심 지표.</strong> 벡터DB는 검색이 빨라(415ms vs ~2s) 비율 자체는 44.8% → 11.1%로 낮아지지만, 분포가 좁고(5–29%) <strong>재현 가능</strong>하다.</p>
+
+  <div class="figgrid">
+    <figure class="dark"><img src="repro/results/figures/decode_rag/latency_breakdown.png" alt="fig C"><figcaption class="ours">Fig C — 평균 지연 분해 (낮을수록 빠름)</figcaption></figure>
+    <figure class="dark"><img src="repro/results/figures/decode_rag/baseline_overview.png" alt="fig D"><figcaption class="ours">Fig D — 종합 baseline (정확도 EM·F1 · 지연 · 검색)</figcaption></figure>
+  </div>
+  <p class="fignote"><strong>종합 비교.</strong> 벡터DB는 더 적은 검색(8.54→4.96)으로 더 정확하고(32→36%) 2.6배 빠르다(e2e median 27.7→10.5s).</p>
+
+  <h3>핵심 비교 표 (실측, ReAct)</h3>
+  <table class="tbl">
+    <colgroup><col class="k"><col><col></colgroup>
+    <thead><tr><th>지표</th><th>라이브 Wikipedia (기존 재현)</th><th>Cohere 벡터DB (현재 실험)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>decode-RAG 비율</strong> (tool/e2e)</td><td class="num">44.8% · median 46.5%</td><td class="num hi">11.1% · median 9.7%</td></tr>
+      <tr><td>EM 정확도 (완전일치)</td><td class="num">32.0% (16/50)</td><td class="num hi">36.0% (18/50)</td></tr>
+      <tr><td>F1 (부분 점수)</td><td class="num">38.5%</td><td class="num hi">44.7%</td></tr>
+      <tr><td>e2e 지연 (median)</td><td class="num">27.7 s</td><td class="num hi">10.5 s</td></tr>
+      <tr><td>tool 시간 (median)</td><td class="num">12.2 s</td><td class="num hi">1.2 s</td></tr>
+      <tr><td>검색 횟수 / 쿼리</td><td class="num">8.54</td><td class="num hi">4.96</td></tr>
+      <tr><td>검색당 시간</td><td class="num">~2,004 ms</td><td class="num hi">~415 ms</td></tr>
+      <tr><td>재현성</td><td class="num">낮음 (라이브·드리프트)</td><td class="num hi">높음 (2023-11 스냅샷 고정)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout amber">
+    <span class="lab">실측으로 확인한 정정 — 커버리지가 오를수록 숨길 지연도 커진다</span>
+    부분 빌드(40샤드, cov 7.2%)에선 비율 6.5%였으나 풀 빌드(415샤드, cov 82.9%)에선 <strong>~10%로 상승</strong>.
+    이유: 커버리지↑ → 더 적은 hop으로 정답 도달(검색 10.7→5.0) → 대화 컨텍스트가 짧아져 <strong>LLM 호출당 시간↓</strong>,
+    동시에 인덱스가 커져 <strong>검색당 시간↑</strong>(305→415ms). 둘 다 retrieval 비중을 키운다.
+    → <strong>현실적 코퍼스일수록 retrieval fraction이 더 크다</strong> = decode-RAG 동기에 유리한 방향.
+  </div>
+
+  <div class="callout green">
+    <span class="lab">decode-RAG 연구에의 함의</span>
+    <ul>
+      <li>이 실험은 <strong>재현 가능한 하한 baseline(~11%)</strong>을 제공한다. 라이브 Wikipedia(~45%)는 상한에 가깝지만 비재현적.</li>
+      <li>두 백엔드를 양 끝점으로 두면 <strong>retrieval-time fraction의 범위를 bracket</strong>할 수 있어, 향후 prefetch/overlap 기법의 잠재 이득 한계를 정량화 가능.</li>
+      <li>밀집 검색이 정확도까지 올린다는 점(+4%p)은, decode-RAG가 "속도와 정확도를 동시에" 노릴 여지를 시사.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===================== PART 4 — 종합·한계·향후 ===================== -->
+<section id="future" class="wrap">
+  <h2 class="sec"><span class="part">PART 4</span>종합 · 한계 · 향후 계획</h2>
+
+  <h3>지금까지의 진행</h3>
+  <ul class="check">
+    <li class="ok"><b>논문 분석</b> — 5종 에이전트 인프라 비용 구조·핵심 figure 해독 완료.</li>
+    <li class="ok"><b>기존 재현</b> — Fig 4/5/6/7/8/13 재현. GPU idle 54.98%(Δ0.48%p), heavy tail p95/p50=3.34 등 패턴 일치.</li>
+    <li class="ok"><b>decode-RAG baseline</b> — ReAct×Cohere 벡터DB로 retrieval-time fraction 측정 (median 9.7%, 재현 가능). 라이브 Wikipedia(44.8%)와 bracket 확보.</li>
+  </ul>
+
+  <h3>알려진 한계</h3>
+  <div class="cols">
+    <div class="card"><h4>환경·모델 격차</h4>
+      <ul>
+        <li><strong>L1·L2</strong> — A100+vLLM+FP16(논문) ↔ M3 Pro+llama.cpp+Q4(우리). 절대 시간 직접 비교 불가, 패턴만.</li>
+        <li><strong>L3</strong> — LATS 표본 3개(쿼리당 17–40분) → Fig 13 Spearman FAIL.</li>
+        <li><strong>L6</strong> — NVIDIA DCGM 없음 → GPU idle은 wall-clock proxy.</li>
+      </ul>
+    </div>
+    <div class="card"><h4>측정·벡터DB 한계</h4>
+      <ul>
+        <li><strong>L4</strong> — Reflexion/LATS/LLMCompiler tool 호출이 콜백 우회 → tool 시간·토큰 분해 불가(Fig 8 FAIL).</li>
+        <li><strong>벡터DB-a</strong> — 쿼리 임베딩이 원격(Cohere API) → 완전 로컬 아님(의도된 선택: 비율 확보).</li>
+        <li><strong>벡터DB-b</strong> — ~11%는 재현 가능한 <strong>하한</strong>. 로컬 FAISS만이면 ~2%, 라이브 위키면 ~45%.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>향후 계획 (다음 스텝)</h3>
+  <ul class="check">
+    <li class="now"><b>decode-RAG 프로토타입</b> — decode 단계 중 retrieval를 prefetch/overlap하여 실제 e2e 지연 절감을 측정. baseline의 retrieval-time fraction이 곧 이론적 상한.</li>
+    <li class="idea"><b>prefix caching sweep (Fig 9)</b> — 캐싱 on/off로 prefill 절감 측정 → 캐싱과 decode-RAG 이득의 상호작용 분석.</li>
+    <li class="idea"><b>코퍼스 스케일 확장</b> — 풀 코퍼스(IVF-PQ)·로컬 dense 대조로 retrieval fraction의 상·하한을 더 넓게 bracket.</li>
+    <li class="idea"><b>일반화</b> — 70B/FP16 또는 다른 모델·다른 워크로드(WebShop 등)로 패턴 확인.</li>
+  </ul>
+
+  <div class="callout blue">
+    <span class="lab">한 줄 요약</span>
+    논문의 핵심 메시지(동적 추론의 인프라 비용, 특히 retrieval 대기로 인한 GPU idle)를 로컬에서 재현했고,
+    그 비효율을 <strong>재현 가능한 숫자(decode-RAG 비율 ~11% 하한 ↔ ~45% 상한)</strong>로 고정했다.
+    다음은 이 slack을 실제로 회수하는 decode-RAG 기법의 구현·측정.
+  </div>
+</section>
+
+<footer class="wrap">
+  <p><strong>참고 자료</strong></p>
+  <ul>
+    <li>논문: <a href="https://arxiv.org/abs/2506.04301" target="_blank">arXiv 2506.04301v2</a> — Kim et al., HPCA-2026, KAIST · 상세 분석 <code>paper_analysis.md</code></li>
+    <li>기존 재현 발표 덱: <code>presentation.html</code> (31슬라이드) · 재현 코드 <code>repro/</code></li>
+    <li>현재 실험: <code>repro/experiments/react_vectordb/</code> (PLAN·RESULTS·DECISIONS) · 비교 그래프 스크립트 <code>repro/analysis/plot_decode_rag_compare.py</code></li>
+    <li>데이터: <code>repro/results/raw/react_vectordb.jsonl</code> (현재) · <code>fig13_pareto.jsonl</code> (기존 ReAct)</li>
+  </ul>
+  <p class="muted" style="margin-top:1rem">생성: 2026-06-07 · 브랜치 experiment/react-vectordb · 환경 Apple M3 Pro · Llama-3.1-8B Q4_K_M</p>
+</footer>
+
+<script>
+(function(){
+  var p=document.getElementById('progress');
+  function upd(){
+    var h=document.documentElement;
+    var max=h.scrollHeight-h.clientHeight;
+    p.style.width=(max>0?(h.scrollTop/max*100):0)+'%';
+  }
+  document.addEventListener('scroll',upd,{passive:true});
+  window.addEventListener('resize',upd); upd();
+})();
+</script>
+</body>
+</html>

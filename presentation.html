@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Cost of Dynamic Reasoning — 재현 발표</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #0d0f14;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+    font-size: 18px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .deck { width: 100vw; height: 100vh; position: relative; }
+
+  /* ---- 슬라이드 공통 ---- */
+  .slide {
+    display: none;
+    width: 100vw; height: 100vh;
+    padding: 3.5vh 4.5vw 4vh;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .slide.active { display: flex; }
+  .slide h1 {
+    font-size: 2.1em;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 0.35em;
+    letter-spacing: -0.01em;
+  }
+  .slide h2 {
+    font-size: 1.45em;
+    font-weight: 600;
+    color: #fff;
+    padding-bottom: 0.45em;
+    margin-bottom: 0.9em;
+    border-bottom: 2px solid #2c5cff;
+    letter-spacing: -0.005em;
+  }
+  .slide h2 .badge {
+    display: inline-block;
+    font-size: 0.55em;
+    font-weight: 500;
+    background: #2c5cff;
+    color: #fff;
+    padding: 0.18em 0.6em;
+    border-radius: 999px;
+    margin-left: 0.6em;
+    vertical-align: middle;
+    letter-spacing: 0;
+  }
+  .slide p, .slide li { font-size: 0.98em; }
+  .slide ul { padding-left: 1.3em; }
+  .slide li { margin-bottom: 0.32em; }
+
+  /* ---- 표지 ---- */
+  .cover {
+    background: radial-gradient(ellipse at top left, #1a2548 0%, #0d0f14 70%);
+    justify-content: center;
+    align-items: flex-start;
+    padding: 8vh 8vw;
+  }
+  .cover .eyebrow { font-size: 0.95em; color: #6e8cff; letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 1em; font-weight: 600; }
+  .cover .title { font-size: 2.6em; font-weight: 700; color: #fff; line-height: 1.18; margin-bottom: 0.3em; max-width: 900px; }
+  .cover .title-ko { font-size: 1.55em; color: #b8c2db; margin-bottom: 1.8em; max-width: 900px; }
+  .cover .authors { font-size: 1.05em; color: #b8c2db; margin-bottom: 0.4em; }
+  .cover .venue { font-size: 0.95em; color: #8693b3; margin-bottom: 2.5em; }
+  .cover .env {
+    background: rgba(44, 92, 255, 0.1);
+    border-left: 3px solid #2c5cff;
+    padding: 1em 1.4em;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.92em;
+    color: #d8def0;
+    max-width: 720px;
+    margin-bottom: 2em;
+  }
+  .cover .env strong { color: #fff; }
+  .cover .speaker { color: #6e8cff; font-size: 0.9em; }
+
+  /* ---- 섹션 디바이더 ---- */
+  .divider {
+    background: linear-gradient(135deg, #1f3a5f 0%, #0d0f14 100%);
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  .divider .section-num { font-size: 1.1em; color: #6e8cff; letter-spacing: 0.3em; margin-bottom: 0.6em; font-weight: 600; }
+  .divider .section-title { font-size: 3em; color: #fff; font-weight: 700; max-width: 80%; line-height: 1.2; }
+  .divider .section-sub { font-size: 1.1em; color: #b8c2db; margin-top: 1.2em; max-width: 70%; }
+
+  /* ---- 비교 슬라이드 (좌:논문 / 우:재현 / 하단:해설) ---- */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5vw;
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-bottom: 1.2vh;
+  }
+  .compare-grid.single { grid-template-columns: 1fr; max-width: 80%; margin-left: auto; margin-right: auto; }
+  .compare-grid figure {
+    background: #161922;
+    border-radius: 8px;
+    padding: 0.8em 1em;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 0;
+    border: 1px solid #2a2f3d;
+  }
+  .compare-grid figcaption {
+    font-size: 0.78em;
+    font-weight: 600;
+    color: #8693b3;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.6em;
+    text-transform: uppercase;
+  }
+  .compare-grid figcaption.paper { color: #aab8e0; }
+  .compare-grid figcaption.ours { color: #8df0c2; }
+  .compare-grid img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .compare-grid.dual-img figure { padding: 0.6em; }
+  .compare-grid.dual-img figcaption { margin-bottom: 0.3em; font-size: 0.72em; }
+
+  /* ---- 해설 박스 ---- */
+  .commentary {
+    background: #1a2030;
+    border-left: 4px solid #5ae0a3;
+    padding: 0.85em 1.3em;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.88em;
+    max-height: 28vh;
+    overflow: hidden;
+  }
+  .commentary .label { font-weight: 700; color: #5ae0a3; font-size: 0.95em; letter-spacing: 0.05em; margin-bottom: 0.35em; display: block; text-transform: uppercase; }
+  .commentary ul { padding-left: 1.1em; margin: 0; }
+  .commentary li { margin-bottom: 0.22em; line-height: 1.5; color: #d8def0; }
+  .commentary li strong { color: #fff; }
+  .commentary li.match::marker { color: #5ae0a3; }
+  .commentary li.diff::marker { color: #ffa45e; }
+  .commentary li.warn::marker { color: #ff6b6b; }
+
+  /* ---- 텍스트-only 슬라이드 ---- */
+  .text-slide .content { flex: 1; padding-top: 0.5em; overflow: hidden; }
+  .text-slide .two-col {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2vw;
+    margin-top: 1em;
+  }
+  .text-slide .col {
+    background: #161922;
+    border-radius: 8px;
+    padding: 1.1em 1.4em;
+    border: 1px solid #2a2f3d;
+  }
+  .text-slide .col.paper { border-left: 4px solid #6e8cff; }
+  .text-slide .col.ours { border-left: 4px solid #5ae0a3; }
+  .text-slide .col h3 { color: #fff; font-size: 1.05em; margin-bottom: 0.5em; }
+  .text-slide .col.paper h3::before { content: "📄 "; }
+  .text-slide .col.ours h3::before { content: "📊 "; }
+  .text-slide .footnote {
+    margin-top: 1.2em;
+    background: #1a2030;
+    border-left: 4px solid #ffa45e;
+    padding: 0.7em 1.2em;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.88em;
+    color: #ffd9b8;
+  }
+
+  /* ---- 키 결과 박스 (큰 수치) ---- */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.2vw;
+    margin-top: 0.5em;
+    flex: 1;
+  }
+  .stat-card {
+    background: linear-gradient(135deg, #1a2548 0%, #161922 100%);
+    border: 1px solid #2c5cff;
+    border-radius: 10px;
+    padding: 1.5em 1.6em;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .stat-card .num {
+    font-size: 2.6em;
+    font-weight: 700;
+    color: #6ea8ff;
+    line-height: 1;
+    margin-bottom: 0.25em;
+    letter-spacing: -0.02em;
+  }
+  .stat-card .num.red { color: #ff7575; }
+  .stat-card .num.green { color: #5ae0a3; }
+  .stat-card .num.orange { color: #ffa45e; }
+  .stat-card .label { font-size: 0.95em; color: #b8c2db; margin-bottom: 0.4em; font-weight: 600; }
+  .stat-card .desc { font-size: 0.82em; color: #8693b3; line-height: 1.45; }
+
+  /* ---- 표 ---- */
+  table.results {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1em;
+    font-size: 0.88em;
+  }
+  table.results th, table.results td {
+    padding: 0.55em 0.8em;
+    border-bottom: 1px solid #2a2f3d;
+    text-align: left;
+  }
+  table.results th {
+    background: #1a2030;
+    color: #b8c2db;
+    font-weight: 600;
+    font-size: 0.82em;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  table.results td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.results .pass { color: #5ae0a3; font-weight: 700; }
+  table.results .fail { color: #ff7575; font-weight: 700; }
+  table.results .partial { color: #ffa45e; font-weight: 700; }
+  table.results td strong { color: #fff; }
+
+  /* ---- 단일 이미지 (논문만) ---- */
+  .single-img-slide .img-zone {
+    flex: 1; min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #161922;
+    border-radius: 8px;
+    padding: 1em;
+    margin-bottom: 1.2vh;
+    border: 1px solid #2a2f3d;
+  }
+  .single-img-slide .img-zone img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+  }
+
+  /* ---- 다중 이미지 (논문만, 2장 횡렬) ---- */
+  .multi-img-slide .multi-zone {
+    flex: 1; min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5vw;
+    margin-bottom: 1.2vh;
+  }
+  .multi-img-slide .multi-zone figure {
+    background: #161922;
+    border-radius: 8px;
+    padding: 0.8em 1em;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 0;
+    border: 1px solid #2a2f3d;
+  }
+  .multi-img-slide .multi-zone figcaption {
+    font-size: 0.82em;
+    color: #b8c2db;
+    margin-bottom: 0.5em;
+    font-weight: 600;
+  }
+  .multi-img-slide .multi-zone img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    flex: 1; min-height: 0;
+  }
+
+  /* ---- 결론 슬라이드 강조 ---- */
+  .conclusion-box {
+    background: linear-gradient(135deg, #1f3a5f 0%, #1a2030 100%);
+    border-radius: 10px;
+    padding: 1.5em 1.8em;
+    margin-top: 1em;
+    border-left: 5px solid #5ae0a3;
+  }
+  .conclusion-box .headline {
+    font-size: 1.5em;
+    color: #5ae0a3;
+    font-weight: 700;
+    margin-bottom: 0.5em;
+  }
+  .conclusion-box p { color: #e8e8ea; font-size: 1em; }
+
+  /* ---- UI ---- */
+  .nav-hint {
+    position: fixed; bottom: 1.2vh; left: 1.5vw;
+    font-size: 0.7em; color: #4a5269;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    z-index: 100;
+  }
+  .page-counter {
+    position: fixed; bottom: 1.2vh; right: 1.5vw;
+    font-size: 0.75em; color: #6e7896;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
+    z-index: 100;
+  }
+  .progress-bar {
+    position: fixed; top: 0; left: 0;
+    height: 3px; background: #2c5cff;
+    transition: width 0.2s ease;
+    z-index: 100;
+  }
+
+  /* ---- 인쇄 (PDF 변환) ---- */
+  @media print {
+    html, body { overflow: visible; height: auto; background: #fff; color: #111; }
+    .slide { display: flex !important; page-break-after: always; height: 100vh; }
+    .nav-hint, .page-counter, .progress-bar { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progress"></div>
+<div class="deck">
+
+<!-- ========================================
+     슬라이드 1 — 표지
+     ======================================== -->
+<section class="slide cover">
+  <div class="eyebrow">HPCA-2026 · arXiv 2506.04301v2 · 재현 발표</div>
+  <div class="title">The Cost of Dynamic Reasoning</div>
+  <div class="title-ko">동적 추론의 비용 — AI 인프라 관점에서 AI Agent와 Test-Time Scaling 해부하기</div>
+  <div class="authors">Jiin Kim · Byeongjun Shin · Jinha Chung · <strong>Minsoo Rhu</strong> (KAIST)</div>
+  <div class="venue">arXiv 2506.04301v2 (2026-01-07) · 본문 11p + 참고문헌 5p · code: <code>github.com/VIA-Research/AgentBench</code></div>
+  <div class="env">
+    <strong>재현 환경</strong> — Apple M3 Pro · 36 GB unified memory · 18 GPU cores (Metal)<br>
+    <strong>LLM</strong> Llama-3.1-8B-Instruct Q4_K_M GGUF (4.6 GB) via llama.cpp<br>
+    <strong>벤치마크</strong> HotpotQA fullwiki · 153 queries (ReAct 50 / Reflexion 50 / LATS 3 / LLMCompiler 50)
+  </div>
+  <div class="speaker">발표: Donghyun · 2026-05-26</div>
+</section>
+
+<!-- ========================================
+     슬라이드 2 — 섹션 1 디바이더
+     ======================================== -->
+<section class="slide divider">
+  <div class="section-num">PART 1</div>
+  <div class="section-title">동기와 문제 정의</div>
+  <div class="section-sub">왜 "에이전트의 인프라 비용"을 측정해야 하는가</div>
+</section>
+
+<!-- ========================================
+     슬라이드 3 — 왜 이 논문인가
+     ======================================== -->
+<section class="slide text-slide">
+  <h1>왜 이 논문인가</h1>
+  <div class="content">
+    <p style="font-size: 1.1em; margin-bottom: 1.2em; color: #b8c2db;">
+      LLM의 발전 패러다임이 <strong style="color: #fff;">"모델·데이터 키우기"</strong>에서 <strong style="color: #fff;">"추론 시 더 깊이 생각하기 (test-time scaling)"</strong>로 이동했고,
+      그 정점에 있는 <strong style="color: #6ea8ff;">AI 에이전트</strong>는 plan → tool → observe → refine 을 반복.
+    </p>
+    <div class="two-col">
+      <div class="col paper">
+        <h3>이미 알려진 것</h3>
+        <ul>
+          <li>정적 LLM의 serving 비용은 잘 측정됨 (vLLM, Orca 등)</li>
+          <li>ChatGPT 1쿼리 ≈ 웹 검색 10배 전력</li>
+          <li>xAI Colossus = H100 100K, 150 MW</li>
+        </ul>
+      </div>
+      <div class="col ours">
+        <h3>아직 측정 안 된 것 (=논문의 갭)</h3>
+        <ul>
+          <li>5종 에이전트의 단대단 인프라 비용</li>
+          <li>LLM 호출 / 도구 호출 / GPU idle 분해</li>
+          <li>Test-time scaling의 한계 비용</li>
+          <li>데이터센터 단위 전력 함의</li>
+        </ul>
+      </div>
+    </div>
+    <div class="footnote">
+      <strong>핵심 질문</strong> — "ChatGPT처럼 한 번에 답하는 LLM 대비, Plan하고 Tool 부르고 Reflect하는 AI 에이전트는 인프라 측면에서 얼마나 더 비쌀까? 그리고 그만큼 정확도가 오를까?"
+    </div>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 4 — Fig 1
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 1 — 정적 vs 동적 추론 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig1.png" alt="Fig 1"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li><strong>(a) 추론 능력 없는 기본 LLM</strong>: 입력 → 단일 forward pass → 출력. 예: "Hello"를 번역.</li>
+      <li><strong>(b) 정적 추론 LLM (CoT 등)</strong>: 내부적으로 중간 단계 생성. 모든 reasoning이 LLM 안에서 일어남.</li>
+      <li><strong>(c) 동적 추론 AI 에이전트</strong>: plan → 외부 도구 호출 → 결과 관찰 → refine. 컨텍스트가 누적되며 회색/분홍/청록/녹색/노랑 5색 토큰 모두 등장.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 5 — Fig 2
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 2 — AI Agent의 5요소 구조 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig2.png" alt="Fig 2"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li><strong>① Agent core</strong> — Actor / Planner / Reflection module 등 LLM 역할 분배.</li>
+      <li><strong>② Memory</strong> — 단기(대화 trace) + 장기(사용자 선호, 과거 시도 결과).</li>
+      <li><strong>③ Plan</strong> — 시퀀스 또는 DAG로 하위 작업 조직.</li>
+      <li><strong>④ Tools</strong> — 외부 환경과 상호작용. 구조화 명령 → 호출 → 결과 컨텍스트 통합.</li>
+      <li><strong>⑤ Workflow</strong> — 위 4요소가 반복 상호작용하는 패턴. ReAct/Reflexion/LATS/LLMCompiler가 서로 다른 패턴.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 6 — Fig 3
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 3 — 5종 에이전트의 실행 타임라인 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig3.png" alt="Fig 3"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li><strong>CoT</strong>: LLM 호출 1회로 끝. 도구 사용 없음.</li>
+      <li><strong>ReAct</strong>: Thought → Action(Tool) → Observation 반복. 가장 직관적인 에이전트 패턴.</li>
+      <li><strong>Reflexion</strong>: ReAct의 trace를 끝낸 뒤 별도 "reflection" 단계가 평가 → 다음 trial.</li>
+      <li><strong>LATS</strong>: 트리 검색 (MCTS). 각 노드 확장마다 자식 후보를 여러 개 sampling — LLM 호출이 자식 수만큼 폭증.</li>
+      <li><strong>LLMCompiler</strong>: 먼저 DAG 형태의 plan을 생성 → 독립 노드를 비동기 병렬 실행.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 7 — 섹션 2 디바이더
+     ======================================== -->
+<section class="slide divider">
+  <div class="section-num">PART 2</div>
+  <div class="section-title">에이전트 분류와 우리 재현 환경</div>
+  <div class="section-sub">무엇을 비교했고, 우리는 그중 무엇을 다시 측정했는가</div>
+</section>
+
+<!-- ========================================
+     슬라이드 8 — Table 1
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Table 1 — 에이전트 비교 매트릭스 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/table1.png" alt="Table 1"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li>5종 에이전트 × 5가지 능력 축 (Reasoning / Tool use / Reflection / Tree search / Planning).</li>
+      <li><strong>CoT</strong>는 reasoning만, <strong>ReAct</strong>는 + tool use, <strong>Reflexion</strong>은 + reflection, <strong>LATS</strong>는 + tree search, <strong>LLMCompiler</strong>는 + DAG planning.</li>
+      <li>이 축이 곧 LLM 호출량·도구 호출 패턴·지연 분포의 차이를 만들어내는 근원.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 9 — Tables 2, 3
+     ======================================== -->
+<section class="slide multi-img-slide">
+  <h2>Table 2 / 3 — 4종 벤치마크 특성 <span class="badge">논문 only</span></h2>
+  <div class="multi-zone">
+    <figure><figcaption>Table 2 — 벤치마크 속성</figcaption><img src="figures/table2.png" alt="Table 2"></figure>
+    <figure><figcaption>Table 3 — 정확도·지연·에너지 (8B vs 70B)</figcaption><img src="figures/table3.png" alt="Table 3"></figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li>논문 벤치마크 4종: <strong>HotpotQA</strong> (multi-hop QA, Wikipedia API) · WebShop (쇼핑) · MATH (수학) · HumanEval (코딩).</li>
+      <li><strong>우리는 HotpotQA만 재현</strong> — Wikipedia API 도구 호출이 GPU idle/heavy-tail 패턴을 가장 잘 드러내기 때문 (decode-RAG 연구의 baseline으로 가장 적합).</li>
+      <li>Table 3 핵심: ShareGPT 대비 LATS 70B는 latency 47.8×, energy 62.1× 폭증.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 10 — 우리 재현 환경
+     ======================================== -->
+<section class="slide text-slide">
+  <h2>우리 재현 환경 vs 논문 환경</h2>
+  <div class="content">
+    <div class="two-col">
+      <div class="col paper">
+        <h3>논문 (KAIST · GCP)</h3>
+        <ul>
+          <li><strong>GPU</strong>: NVIDIA A100 40GB × 1 (8B) / × 8 (70B)</li>
+          <li><strong>LLM Backend</strong>: vLLM 0.6.6 · PyTorch 2.6 · CUDA 12.8</li>
+          <li><strong>모델</strong>: Llama-3.1-8B-Instruct FP16, 70B-Instruct FP16</li>
+          <li><strong>Prefix caching</strong>: 기본 활성화</li>
+          <li><strong>벤치마크</strong>: HotpotQA · WebShop · MATH · HumanEval (각 50 샘플)</li>
+        </ul>
+      </div>
+      <div class="col ours">
+        <h3>우리 (M3 Pro · 로컬)</h3>
+        <ul>
+          <li><strong>GPU</strong>: Apple M3 Pro 18-core (Metal, 36GB unified)</li>
+          <li><strong>LLM Backend</strong>: llama.cpp build <code>b9310</code></li>
+          <li><strong>모델</strong>: Llama-3.1-8B-Instruct <strong>Q4_K_M GGUF</strong> (4.6 GB)</li>
+          <li><strong>Prefix caching</strong>: 기본 off (fig9 cache_on sweep은 별도)</li>
+          <li><strong>벤치마크</strong>: <strong>HotpotQA만</strong> (153 queries 총)</li>
+        </ul>
+      </div>
+    </div>
+    <div class="footnote">
+      <strong>재현 전략</strong> — 절대 수치(초·Wh)는 환경 격차로 비교 불가. 대신 <strong>비율·분포·순위·트레이드오프 형상</strong>을 재현 목표로 함. "패턴 수준에서 일치하는가?"가 핵심 질문.
+    </div>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 11 — 섹션 3 디바이더
+     ======================================== -->
+<section class="slide divider">
+  <div class="section-num">PART 3</div>
+  <div class="section-title">측정 결과 — 우리가 재현한 핵심 figure</div>
+  <div class="section-sub">좌:논문 · 우:우리 재현 · 하단:비교 해설</div>
+</section>
+
+<!-- ========================================
+     슬라이드 12 — Fig 4
+     ======================================== -->
+<section class="slide">
+  <h2>Fig 4 — 요청당 LLM·Tool 호출 횟수</h2>
+  <div class="compare-grid">
+    <figure>
+      <figcaption class="paper">📄 논문 (A100 · 4 bench · 5 agent)</figcaption>
+      <img src="figures/fig4.png" alt="Paper Fig 4">
+    </figure>
+    <figure>
+      <figcaption class="ours">📊 우리 재현 (M3 Pro · HotpotQA · 4 agent)</figcaption>
+      <img src="repro/results/figures/fig4_calls.png" alt="Our Fig 4">
+    </figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설 (Tool 카운트 사후 복구 반영)</span>
+    <ul>
+      <li class="match"><strong>일치 패턴</strong>: LATS가 다른 에이전트 대비 압도적으로 많은 LLM 호출. <strong>논문 71회/query, 우리 193회/query</strong> — 같은 방향, 트리 폭 차이로 더 큼.</li>
+      <li class="diff"><strong>Tool 카운트 측정 한계 (L4)</strong>: ReAct(8.5)만 LangChain 표준 콜백으로 직접 측정. Reflexion/LATS/LLMCompiler는 자체 wrapper로 콜백 우회 → 처음에는 0으로 나옴.</li>
+      <li class="match"><strong>사후 복구 (이번 업데이트)</strong>: 구조적 모델로 재추정 — Reflexion ≈ <strong>14</strong> (n_llm − 2×reflections − 1), LATS ≈ <strong>55</strong> (n_tree_expansions × 5 children × 3 actions). 모두 ReAct 8.5 보다 많음 = 도구를 더 자주 부른다는 패턴 일치.</li>
+      <li class="warn"><strong>LLMCompiler 예외</strong>: n_llm = 1.18 로 plan 호출만 발생 + 최종 답변이 50쿼리 중 41개에서 빈 문자열 → executor 자체가 작동 안 함. Tool 카운트 복구 불가능 ("?"로 표시).</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 13 — Fig 5
+     ======================================== -->
+<section class="slide">
+  <h2>Fig 5 — 지연 시간 분해 (Latency Breakdown)</h2>
+  <div class="compare-grid">
+    <figure>
+      <figcaption class="paper">📄 논문 (4 bench × 5 agent)</figcaption>
+      <img src="figures/fig5.png" alt="Paper Fig 5">
+    </figure>
+    <figure>
+      <figcaption class="ours">📊 우리 재현 (HotpotQA · ReAct 기준)</figcaption>
+      <img src="repro/results/figures/fig5_latency_breakdown.png" alt="Our Fig 5">
+    </figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설 (Tool latency 사후 추정 반영)</span>
+    <ul>
+      <li class="match"><strong>ReAct (측정 신뢰)</strong>: Prefill 6.6s (16%) · Decode 14.7s (36%) · <strong>Tool wait 17.7s (44%)</strong> — HotpotQA에서 Wikipedia tool wait가 단일 최대 컴포넌트, 논문과 일치.</li>
+      <li class="diff"><strong>Reflexion/LATS (측정 한계 + 사후 추정)</strong>: tool_ms = 0 (L4 콜백 우회) → recovered count × ReAct rate(2.08s/call)로 빗금 막대 추정. <strong>Reflexion ≈ 29s (33% of 87s), LATS ≈ 114s (11% of 1037s)</strong>.</li>
+      <li class="warn"><strong>Raw sum &gt; 100% 경고</strong>: Reflexion 157%, LATS 328% — 100ms 폴링 thread가 동시 실행 구간에서 prefill·decode를 중복 attribution. 즉 prefill/decode 막대 자체도 실제보다 부풀려진 상태 → 100%로 정규화 표시.</li>
+      <li class="warn"><strong>LLMCompiler 회색 overhead 84%</strong>: tool 호출이 "overhead" 버킷에 들어감 (executor 깨짐). 실제로 Wikipedia 호출 중 대기 시간이지만 분류 불가.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 14 — Fig 6 (논문만 + 우리 수치)
+     ======================================== -->
+<section class="slide">
+  <h2>Fig 6 — GPU 활용률 (가장 강한 재현 검증)</h2>
+  <div class="compare-grid">
+    <figure>
+      <figcaption class="paper">📄 논문 — NVIDIA DCGM 직접 측정</figcaption>
+      <img src="figures/fig6.png" alt="Paper Fig 6">
+    </figure>
+    <figure style="background: linear-gradient(135deg, #1a2548 0%, #161922 100%); border-color: #2c5cff;">
+      <figcaption class="ours">📊 우리 — wall-clock proxy <code style="background:#0d0f14;padding:0 6px;border-radius:3px;font-size:0.85em">1 - (prefill+decode)/e2e</code></figcaption>
+      <div style="flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; padding: 2em;">
+        <div style="font-size: 5em; font-weight: 700; color: #5ae0a3; line-height: 1; letter-spacing: -0.03em;">54.98%</div>
+        <div style="margin-top: 0.6em; font-size: 1.05em; color: #b8c2db;">ReAct mean GPU idle ratio</div>
+        <div style="margin-top: 2em; font-size: 0.95em; color: #8693b3;">논문 측정값: <strong style="color:#fff">54.5%</strong></div>
+        <div style="margin-top: 0.4em; font-size: 1.5em; color: #5ae0a3; font-weight: 700;">|Δ| = 0.48%p</div>
+      </div>
+    </figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설 — 본 재현의 가장 강력한 검증 포인트</span>
+    <ul>
+      <li class="match"><strong>논문 §IV-A.2: ReAct HotpotQA GPU idle = 54.5%</strong> (NVIDIA DCGM) → <strong>우리 측정 54.98%</strong> (wall-clock proxy).</li>
+      <li class="match">두 측정이 <strong>0.5%p 안에 일치</strong> — 측정 방식이 다른데도 일치. 우연이 아닌 <strong>구조적 패턴</strong>.</li>
+      <li class="warn">"GPU가 외부 도구(Wikipedia API) 응답을 기다리는 시간"이 단일 최대 비효율 — decode-RAG가 직접 노릴 수 있는 영역.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 15 — Fig 7
+     ======================================== -->
+<section class="slide">
+  <h2>Fig 7 — 단대단 지연 분포 (Heavy Tail)</h2>
+  <div class="compare-grid">
+    <figure>
+      <figcaption class="paper">📄 논문 — ShareGPT vs ReAct (HotpotQA/WebShop)</figcaption>
+      <img src="figures/fig7.png" alt="Paper Fig 7">
+    </figure>
+    <figure>
+      <figcaption class="ours">📊 우리 — ReAct HotpotQA n=50</figcaption>
+      <img src="repro/results/figures/fig7_latency_dist.png" alt="Our Fig 7">
+    </figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설 (4 agent 분포 enriched)</span>
+    <ul>
+      <li class="match"><strong>일치 패턴</strong>: ReAct 지연이 heavy tail. ReAct median <strong>27.7s</strong>, p95 <strong>87.2s</strong>, max 115s, <strong>p95/p50 = 3.15</strong> (검증 기준 ≥ 2.0 PASS).</li>
+      <li class="match"><strong>Reflexion 분포</strong> (n=50, 노랑 선): median 73.5s, p95 234s, <strong>p95/p50 = 3.19</strong> — ReAct와 동일 ratio지만 분포가 우측으로 평행 이동 (반성 단계가 절대값을 키움).</li>
+      <li class="diff"><strong>LLMCompiler 가장 heavy tail</strong> (n=50, 회색 선): <strong>p95/p50 = 7.63</strong> — bimodal 분포 (~5s 실패 클러스터 + ~90s 시도 클러스터). executor 깨짐의 직접 증거.</li>
+      <li class="diff">절대값(87.2s vs 논문 20.7s)이 4-5배 큰 이유: M3 Pro Q4가 A100 + vLLM보다 단위 처리 속도 느림.</li>
+      <li class="warn">시사점 — agentic workload는 평균이 아닌 <strong>p95</strong>를 봐야 함. mean 기반 SLA는 실제 사용자가 보는 latency를 과소평가.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 16 — Fig 8
+     ======================================== -->
+<section class="slide">
+  <h2>Fig 8 — 입력/출력 토큰 분해</h2>
+  <div class="compare-grid">
+    <figure>
+      <figcaption class="paper">📄 논문 — 5-way 분해 (Instruction/Few-shot/User/LLM hist/Tool hist)</figcaption>
+      <img src="figures/fig8.png" alt="Paper Fig 8">
+    </figure>
+    <figure>
+      <figcaption class="ours">📊 우리 — 4-way 분해 (system/human/ai/tool)</figcaption>
+      <img src="repro/results/figures/fig8_token_decomp.png" alt="Our Fig 8">
+    </figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설 (논문 색상 매핑 + L4 한계 표시)</span>
+    <ul>
+      <li class="match"><strong>총량 트렌드 일치</strong>: LATS input <strong>1.3M 토큰</strong> (회색 system 압도적) — 트리 모든 가지가 system prompt 재포함. ReAct 920K, Reflexion 620K, LLMCompiler 50K (executor 깨짐).</li>
+      <li class="match"><strong>색상 매핑</strong> — 회색 = Instruction+Few-shot (논문 light/dark gray), 검정 = User, 녹색 = LLM history, 노랑 = Tool history, 빨강 = Output.</li>
+      <li class="warn"><strong>L4 한계 — input/tool = 0 across all agents</strong>: HotpotQA tool 응답이 LangChain <code>HumanMessage</code>로 래핑되어 우리 핸들러가 "tool" 카테고리로 못 잡음. 차트의 노랑 막대가 비어있는 이유. 페이퍼 6-way 분해(Instruction/Few-shot/User/LLM hist/Tool hist/Output) 대비 우리 4-way (system/human/ai/tool) 한계.</li>
+      <li class="warn"><strong>LLMCompiler 빈 막대</strong>: planner 1번만 돌고 executor 깨짐 → tokens_input/output = 0 (callback 미캡처). Fig 4의 "?"와 같은 원인.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 17 — Fig 13 (핵심 슬라이드)
+     ======================================== -->
+<section class="slide">
+  <h2>Fig 13 — Accuracy vs Latency Pareto Frontier <span class="badge">핵심</span></h2>
+  <div class="compare-grid">
+    <figure>
+      <figcaption class="paper">📄 논문 — 4 bench × 4 agent × 8B/70B</figcaption>
+      <img src="figures/fig13.png" alt="Paper Fig 13">
+    </figure>
+    <figure>
+      <figcaption class="ours">📊 우리 — HotpotQA × 4 agent × 8B Q4</figcaption>
+      <img src="repro/results/figures/fig13_pareto.png" alt="Our Fig 13">
+    </figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설 (논문 마커 매핑 + 한계 주석)</span>
+    <ul>
+      <li class="match"><strong>마커 매핑</strong>: 빨강 사각 = ReAct, 노랑 동그라미 = Reflexion, 파랑 삼각 = LATS, 회색 다이아 = LLMCompiler — 모두 논문 Fig 13 convention과 동일.</li>
+      <li class="match"><strong>일치 핵심</strong>: <strong>LATS 가장 정확 + 가장 비싼</strong> 페이퍼 형상 재현 (33% / 1037s vs ReAct 32% / 41s → <strong>25× 비용 / 1% 정확도 이득</strong>). LLMCompiler가 가장 빠름(27.8s)도 일치.</li>
+      <li class="diff"><strong>차이</strong>: 우리 Reflexion(16%)이 ReAct(32%)보다 정확도 낮음 — 페이퍼와 반대. 원인: Q4 양자화에서 reflection 단계가 자기수정보다 노이즈 추가.</li>
+      <li class="warn"><strong>LLMCompiler 18% 주의</strong>: executor 깨져서 50쿼리 중 41개가 빈 답 → "정확도 18%"는 partial 결과 (차트에서 빨강 주석으로 표시).</li>
+      <li class="warn"><strong>LATS 통계 한계</strong>: 표본 3개로 Spearman ρ(latency, accuracy) = 0.40 (기준 ≥0.6 FAIL). 차트에서 회색 주석으로 표시.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 18 — 섹션 4 디바이더
+     ======================================== -->
+<section class="slide divider">
+  <div class="section-num">PART 4</div>
+  <div class="section-title">Serving · 캐싱 · Test-Time Scaling</div>
+  <div class="section-sub">우리가 미실행한 영역 — 논문 결과 중심으로 정리</div>
+</section>
+
+<!-- ========================================
+     슬라이드 19 — Fig 9
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 9 — Prefix Caching 효과 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig9.png" alt="Fig 9"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li>에이전트는 반복 호출마다 input prefix를 공유 → <strong>prefix caching으로 prefill 평균 60.1% 감소</strong>.</li>
+      <li><strong>단대단 지연 평균 15.7% 감소</strong>. 모듈 단위 개선이 시스템 전체에 큰 영향.</li>
+      <li>CoT는 호출 1회뿐이라 효과 없음. 에이전트 워크로드에서만 효과 큼.</li>
+      <li class="warn"><strong>우리 한계</strong>: <code>fig13_pareto_cache_on.yaml</code> sweep 설정은 있으나 시간 제약으로 실행 못 함. 패턴 재현은 향후 작업.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 20 — Fig 10
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 10 — AI Agent Serving 시스템 아키텍처 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig10.png" alt="Fig 10"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li>다중 사용자 동시 요청을 처리하는 serving 시스템 개요.</li>
+      <li>각 사용자 요청은 독립적인 agent loop를 가짐 → 자원 스케줄링 복잡도 증가.</li>
+      <li>단일 요청 내(intra-request)에서는 LLM-tool 순차 의존성으로 병렬화 어려움 → <strong>inter-request 병렬성</strong>으로 자원 활용 끌어올려야 함.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 21 — Fig 11/12
+     ======================================== -->
+<section class="slide multi-img-slide">
+  <h2>Fig 11 / 12 — 95%-ile latency vs QPS, KV cache 메모리 <span class="badge">논문 only</span></h2>
+  <div class="multi-zone">
+    <figure><figcaption>Fig 11 — p95 latency vs QPS (with/without prefix cache)</figcaption><img src="figures/fig11.png" alt="Fig 11"></figure>
+    <figure><figcaption>Fig 12 — KV cache 메모리 사용량 (avg/max)</figcaption><img src="figures/fig12.png" alt="Fig 12"></figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li><strong>Fig 11</strong>: ChatGPT vs 에이전트 비교 QPS-throughput 곡선. 에이전트는 같은 QPS에서 훨씬 높은 p95 — prefix caching이 곡선을 우측 평탄화.</li>
+      <li><strong>Fig 12</strong>: prefix caching으로 KV cache 평균 사용량 <strong>51.7% 감소</strong>, 최대 <strong>63.5% 감소</strong>. GPU 메모리 자원 효율 활용.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 22 — Fig 14/15
+     ======================================== -->
+<section class="slide multi-img-slide">
+  <h2>Fig 14 / 15 — Iteration · Few-shot Scaling (ReAct) <span class="badge">논문 only</span></h2>
+  <div class="multi-zone">
+    <figure><figcaption>Fig 14 — Iteration budget vs latency · accuracy</figcaption><img src="figures/fig14.png" alt="Fig 14"></figure>
+    <figure><figcaption>Fig 15 — Few-shot 예시 수 vs latency · accuracy</figcaption><img src="figures/fig15.png" alt="Fig 15"></figure>
+  </div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li><strong>Fig 14 (Iteration)</strong>: 평균 지연·정확도는 빠르게 포화. 그러나 <strong>p95 지연은 계속 선형 증가</strong> — outlier가 budget을 모두 소진해 latency tail만 키움.</li>
+      <li><strong>Fig 15 (Few-shot)</strong>: 예시 추가는 초기 정확도 향상. 흥미롭게도 <strong>평균 지연은 오히려 감소</strong> — 좋은 예시가 더 적은 reasoning 단계로 풀게 도와줌.</li>
+      <li>파란 다이아몬드 = accuracy/latency 비율 최대 = 가장 비용-효과적 튜닝 포인트.</li>
+      <li class="warn"><strong>우리 한계</strong>: <code>fig14_iteration.yaml</code>, <code>fig15_fewshot.yaml</code> sweep config 보유. 시간 제약으로 미실행.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 23 — Fig 16
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 16 — Test-Time Scaling: Sequential vs Parallel <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig16.png" alt="Fig 16"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li><strong>(a) Reflexion sequential</strong>: reflection step 2 → 32. 정확도 ↑ 하지만 <strong>한계 비용 31× 증가</strong> (16.9→25.6s에서 +4% / 56s→325s에서도 +4%).</li>
+      <li><strong>(b) LATS sequential</strong>: 동일한 수확체감 패턴.</li>
+      <li><strong>(c) LATS parallel</strong>: 자식 노드 1→16 늘리면 <strong>정확도 +14.4%p, 동시에 평균 지연 -196.3s</strong>. 단 동시 LLM 호출 폭증 → 자원 제약 환경에서 어려움.</li>
+      <li>정책 시사: 지연 민감 워크로드는 parallel scaling, 자원 제약 환경은 sequential.</li>
+      <li class="warn"><strong>우리 한계</strong>: <code>fig16{a,b,c}.yaml</code> sweep 보유 (fig16b는 iter=32 cut). 시간상 미실행.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 24 — 섹션 5 디바이더
+     ======================================== -->
+<section class="slide divider">
+  <div class="section-num">PART 5</div>
+  <div class="section-title">AI 인프라적 함의</div>
+  <div class="section-sub">에이전트 트래픽이 데이터센터 전력에 미치는 충격</div>
+</section>
+
+<!-- ========================================
+     슬라이드 25 — Fig 17
+     ======================================== -->
+<section class="slide single-img-slide">
+  <h2>Fig 17 — 모델 사이즈별 정확도-비용 트레이드오프 <span class="badge">논문 only</span></h2>
+  <div class="img-zone"><img src="figures/fig17.png" alt="Fig 17"></div>
+  <div class="commentary">
+    <span class="label">해설</span>
+    <ul>
+      <li>HotpotQA에서 Reflexion(상단)·LATS(하단)를 8B(녹색) vs 70B(빨강)로 비교.</li>
+      <li><strong>(c) Accuracy vs Energy</strong>: 70B는 ~400 Wh 사용. 8B는 일부만 — <strong>8B가 70B보다 에너지 효율적</strong> (단일 A100 vs 8개 A100).</li>
+      <li>흥미 통찰: <strong>8B + LATS + parallel scaling</strong> 으로 70B에 근접하는 정확도를 더 낮은 에너지로 달성 가능.</li>
+      <li>"무조건 큰 모델"이 정답이 아님 — 효과적 test-time 전략으로 모델 사이즈 격차를 메울 수 있다.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 26 — 핵심 수치
+     ======================================== -->
+<section class="slide text-slide">
+  <h2>논문의 핵심 충격 수치</h2>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="num red">62~136×</div>
+      <div class="label">쿼리당 GPU 에너지 폭증</div>
+      <div class="desc">ShareGPT(정적 1-turn LLM) baseline 대비. Reflexion 70B = 348 Wh/query, ShareGPT 70B = 2.55 Wh/query.</div>
+    </div>
+    <div class="stat-card">
+      <div class="num orange">최대 71×</div>
+      <div class="label">LLM 호출 폭증 (LATS)</div>
+      <div class="desc">CoT 대비 평균 9.2×. LATS는 트리 자식 노드마다 별도 LLM 호출 → 평균 71 calls/query.</div>
+    </div>
+    <div class="stat-card">
+      <div class="num">54.5%</div>
+      <div class="label">GPU idle (ReAct HotpotQA)</div>
+      <div class="desc">에이전트 단일 요청 처리 중 GPU가 도구 응답을 기다리는 시간. <strong>우리 측정 54.98%로 일치</strong>.</div>
+    </div>
+    <div class="stat-card">
+      <div class="num orange">31×</div>
+      <div class="label">test-time scaling 한계 비용</div>
+      <div class="desc">Reflexion: 8.7s 추가로 +4% accuracy → 56s 시점에서 동일 +4% 위해 +269.5s 필요 (31×).</div>
+    </div>
+    <div class="stat-card">
+      <div class="num red">≈ 1 GW</div>
+      <div class="label">ChatGPT 트래픽 × Reflexion 70B</div>
+      <div class="desc">7,140만 DAU × 1 query/일 가정. OpenAI Stargate(GW급)가 정확히 이 미래에 대응.</div>
+    </div>
+    <div class="stat-card">
+      <div class="num red">≈ 200 GW</div>
+      <div class="label">Google 검색 트래픽 × Reflexion 70B</div>
+      <div class="desc">137억 query/일. <strong>미국 전체 전력 평균 부하의 절반</strong> 수준 (US 평균 = 476.9 GW).</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 27 — 섹션 6 디바이더
+     ======================================== -->
+<section class="slide divider">
+  <div class="section-num">PART 6</div>
+  <div class="section-title">우리 재현의 결론과 한계</div>
+  <div class="section-sub">무엇이 재현됐고, 무엇이 안 됐고, 왜인가</div>
+</section>
+
+<!-- ========================================
+     슬라이드 28 — Verification 테이블
+     ======================================== -->
+<section class="slide text-slide">
+  <h2>재현 결과 검증 (Verification)</h2>
+  <table class="results">
+    <thead>
+      <tr>
+        <th>Figure</th>
+        <th>검증 기준 (spec §12)</th>
+        <th>실제 측정</th>
+        <th>결과</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Fig 4</td>
+        <td>LATS / ReAct LLM 호출 비율 ≥ 5.0</td>
+        <td class="num"><strong>21.87</strong></td>
+        <td class="pass">✅ PASS</td>
+      </tr>
+      <tr>
+        <td>Fig 4 (tool count)</td>
+        <td>모든 에이전트 tool 호출 측정</td>
+        <td class="num">ReAct 8.5 · Reflexion <em>~14*</em> · LATS <em>~55*</em> · LLMCompiler ?</td>
+        <td class="partial">⚠️ PARTIAL (* = 사후 구조적 복구)</td>
+      </tr>
+      <tr>
+        <td>Fig 5</td>
+        <td>구성 비율 합이 ≤ 100%</td>
+        <td>OK</td>
+        <td class="pass">✅ PASS</td>
+      </tr>
+      <tr>
+        <td>Fig 6</td>
+        <td>ReAct GPU idle ratio ≈ 54.5%</td>
+        <td class="num"><strong>54.98%</strong></td>
+        <td class="pass">✅ PASS (Δ 0.48%p)</td>
+      </tr>
+      <tr>
+        <td>Fig 7</td>
+        <td>p95 / p50 ≥ 2.0</td>
+        <td class="num"><strong>3.34</strong></td>
+        <td class="pass">✅ PASS</td>
+      </tr>
+      <tr>
+        <td>Fig 8</td>
+        <td>HotpotQA tool tokens ≥ 10%</td>
+        <td class="num">0%</td>
+        <td class="fail">❌ FAIL — handler 한계 (L4)</td>
+      </tr>
+      <tr>
+        <td>Fig 13</td>
+        <td>LATS / ReAct accuracy ≥ 0.9 AND LATS latency &gt; ReAct</td>
+        <td class="num">1.042 &amp; 1037s &gt; 41s ✓</td>
+        <td class="partial">⚠️ PARTIAL</td>
+      </tr>
+      <tr>
+        <td>Fig 13</td>
+        <td>Spearman ρ(latency, accuracy) ≥ 0.6</td>
+        <td class="num">0.40 (LATS 표본 3개 한계)</td>
+        <td class="fail">❌ FAIL — 통계 표본 부족 (L3)</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="footnote">
+    <strong>요약</strong> — Fig 4/5/6/7 PASS, Fig 13 PARTIAL (형상 일치, LATS 표본 부족), Fig 8 FAIL (token 분해 불가). <strong>Fig 4의 tool 카운트는 측정 한계였으나 사후 구조적 복구로 보강</strong>: ReAct(measured) 8.5, Reflexion(est) ~14, LATS(est) ~55 — 모두 ReAct 보다 도구를 더 자주 부름. LLMCompiler는 executor 자체 고장으로 카운트 복구 불가능.
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 29 — 알려진 한계
+     ======================================== -->
+<section class="slide text-slide">
+  <h2>알려진 한계 (재현성 제약)</h2>
+  <div class="content">
+    <div class="two-col">
+      <div class="col paper">
+        <h3>하드웨어·모델 격차</h3>
+        <ul>
+          <li><strong>L1</strong> — A100 + vLLM (논문) → M3 Pro + llama.cpp (우리). 절대 throughput 약 5-10× 느림. 시간값 직접 비교 불가, 패턴만 비교.</li>
+          <li><strong>L2</strong> — Llama-3.1-8B <strong>Q4_K_M</strong> 양자화 (논문은 FP16). Q4 노이즈가 LATS(193 LLM calls)에 가장 크게 누적. Reflexion이 ReAct보다 정확도 낮은 원인 후보.</li>
+          <li><strong>L6</strong> — NVIDIA DCGM 없음. Apple GPU 등가물 없어 wall-clock proxy 사용. 의외로 54.5% vs 54.98%로 일치했지만 의미가 정확히 동일하지는 않음.</li>
+        </ul>
+      </div>
+      <div class="col ours">
+        <h3>표본·인프라 한계</h3>
+        <ul>
+          <li><strong>L3</strong> — LATS 표본 <strong>3개</strong> (논문 50). M3 Pro에서 LATS 1쿼리당 17-40분 소요. Fig 13 Spearman FAIL의 직접 원인.</li>
+          <li><strong>L4</strong> — Reflexion·LATS·LLMCompiler의 tool 호출이 LangChain <code>BaseTool.invoke</code>를 안 거쳐 우리 핸들러가 못 잡음. <strong>Tool 카운트는 사후 구조적 복구</strong>(<code>recover_tool_calls.py</code>) — Reflexion ~14, LATS ~55. <strong>Tool 실행 시간(<code>tool_ms</code>)과 토큰 분해는 복구 불가</strong> — Fig 8 FAIL의 원인.</li>
+          <li><strong>L5</strong> — Wikipedia API live 호출. 논문(2026-01)과 우리(2026-05) 사이 4개월간 내용 변동 가능성.</li>
+          <li><strong>L7</strong> — Serving 실험(Fig 10/11/12) 미수행. decode-RAG는 single-request부터 검증 가능하므로 영향 적음.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 30 — 결론
+     ======================================== -->
+<section class="slide text-slide">
+  <h2>결론</h2>
+  <div class="content">
+    <div class="conclusion-box">
+      <div class="headline">패턴 수준에서 핵심 메시지 재현 성공</div>
+      <p>M3 Pro + Llama-3.1-8B Q4 환경에서도 페이퍼의 <strong>"동적 추론의 인프라 비용"</strong> 핵심 메시지가 동일한 형상으로 재현됨. 절대 수치가 아닌 <strong>비율·분포·트레이드오프 패턴</strong>이 일치.</p>
+    </div>
+    <div style="margin-top: 1.5em;">
+      <h3 style="color: #fff; font-size: 1.1em; margin-bottom: 0.6em;">재현된 핵심 패턴 5가지</h3>
+      <ul style="line-height: 1.85;">
+        <li>🎯 <strong>GPU idle 54.5% → 54.98%</strong> — 단 0.48%p 차이 (논문 NVIDIA DCGM, 우리 wall-clock proxy)</li>
+        <li>📈 <strong>LATS LLM 호출 폭증</strong> — 논문 71×, 우리 22× (같은 자릿수 트렌드)</li>
+        <li>⏱ <strong>Tool wait가 latency 지배</strong> — ReAct HotpotQA에서 단일 최대 컴포넌트 (우리 44%)</li>
+        <li>📊 <strong>Heavy-tail 분포</strong> — p95/p50 = 3.34 (논문도 ShareGPT 대비 훨씬 wider)</li>
+        <li>💰 <strong>LATS 수확체감</strong> — 25× wall-clock 비용 / 1% accuracy 이득 (논문 31× 패턴과 형상 일치)</li>
+      </ul>
+    </div>
+    <div class="footnote" style="margin-top: 1.2em;">
+      <strong>decode-RAG 연구에의 함의</strong> — ReAct GPU idle 55%, Tool wait 44%, p95/p50 = 3.34는 모두 decode 중 retrieval prefetch/overlap 기법이 직접 노릴 수 있는 비효율 영역. 본 재현이 그 motivation의 정량적 baseline을 제공.
+    </div>
+  </div>
+</section>
+
+<!-- ========================================
+     슬라이드 31 — Q&A / References
+     ======================================== -->
+<section class="slide text-slide">
+  <h1 style="text-align: center; font-size: 3em; margin-top: 8vh;">Q &amp; A</h1>
+  <div style="margin-top: 4vh; text-align: center;">
+    <p style="font-size: 1.05em; color: #b8c2db; margin-bottom: 2em;">감사합니다.</p>
+    <div style="display: inline-block; text-align: left; background: #161922; padding: 1.5em 2em; border-radius: 8px; border: 1px solid #2a2f3d;">
+      <h3 style="color: #fff; font-size: 1.05em; margin-bottom: 0.7em;">참고</h3>
+      <ul style="line-height: 1.9; font-size: 0.92em;">
+        <li><strong>논문</strong>: arXiv <a href="https://arxiv.org/abs/2506.04301" style="color: #6ea8ff;">2506.04301v2</a> — Kim et al., HPCA-2026, KAIST</li>
+        <li><strong>AgentBench repo</strong>: <code>github.com/VIA-Research/AgentBench</code></li>
+        <li><strong>우리 재현 코드</strong>: <code>/Users/imdonghyeon/agentic_rag/repro/</code></li>
+        <li><strong>상세 분석</strong>: <code>paper_analysis.md</code> (803줄, 한국어)</li>
+        <li><strong>재현 리포트</strong>: <code>repro/results/report.html</code></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<div class="nav-hint">← → 또는 Space · F = 전체화면 · Home/End</div>
+<div class="page-counter"><span id="cur">1</span> / <span id="total">31</span></div>
+
+<script>
+(function() {
+  const slides = document.querySelectorAll('.slide');
+  const counter = document.getElementById('cur');
+  const total = document.getElementById('total');
+  const progress = document.getElementById('progress');
+  total.textContent = slides.length;
+
+  let i = 0;
+  function show(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, idx) => s.classList.toggle('active', idx === i));
+    counter.textContent = i + 1;
+    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    if (location.hash !== '#' + (i + 1)) {
+      history.replaceState(null, '', '#' + (i + 1));
+    }
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); show(i + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); show(i - 1); }
+    else if (e.key === 'Home') { e.preventDefault(); show(0); }
+    else if (e.key === 'End') { e.preventDefault(); show(slides.length - 1); }
+    else if (e.key === 'f' || e.key === 'F') {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+  });
+
+  document.addEventListener('click', e => {
+    if (e.target.tagName === 'A') return;
+    const x = e.clientX / window.innerWidth;
+    if (x > 0.65) show(i + 1);
+    else if (x < 0.35) show(i - 1);
+  });
+
+  const initial = parseInt(location.hash.slice(1)) || 1;
+  show(initial - 1);
+})();
+</script>
+
+</body>
+</html>

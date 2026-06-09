@@ -1,0 +1,42 @@
+{
+  "react": {
+    "rows": 50,
+    "n_llm_calls_mean": 8.84,
+    "n_tool_calls_measured_mean": 8.54,
+    "n_tool_calls_estimated_mean": 8.54,
+    "estimation_method": "measured",
+    "accuracy_pct": 32.0,
+    "n_reflections_mean": 0,
+    "n_tree_expansions_mean": 0
+  },
+  "reflexion": {
+    "rows": 50,
+    "n_llm_calls_mean": 18.54,
+    "n_tool_calls_measured_mean": 0,
+    "n_tool_calls_estimated_mean": 14.02,
+    "estimation_method": "n_llm − n_reflections − (n_reflections + 1)",
+    "accuracy_pct": 16.0,
+    "n_reflections_mean": 1.76,
+    "n_tree_expansions_mean": 0
+  },
+  "lats": {
+    "rows": 3,
+    "n_llm_calls_mean": 193.33,
+    "n_tool_calls_measured_mean": 0,
+    "n_tool_calls_estimated_mean": 55,
+    "estimation_method": "n_tree_expansions × 5 children × 3.0 actions",
+    "accuracy_pct": 33.3,
+    "n_reflections_mean": 0,
+    "n_tree_expansions_mean": 3.67
+  },
+  "llmcompiler": {
+    "rows": 50,
+    "n_llm_calls_mean": 1.18,
+    "n_tool_calls_measured_mean": 0,
+    "n_tool_calls_estimated_mean": null,
+    "estimation_method": "UNKNOWN — planner ran but executor broken (final_answer empty in 41/50)",
+    "accuracy_pct": 18.0,
+    "n_reflections_mean": 0,
+    "n_tree_expansions_mean": 0
+  }
+}
