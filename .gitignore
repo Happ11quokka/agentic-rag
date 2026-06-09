@@ -30,3 +30,6 @@ repro/setup/llama.cpp.build/
 
 # OS
 .DS_Store
+
+# Claude Code local state
+.claude/
