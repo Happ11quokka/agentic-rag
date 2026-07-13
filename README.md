@@ -213,3 +213,70 @@ pytest repro/tests/                      # measurement·sweep 단위 + integrati
 - 논문: Kim et al., *The Cost of Dynamic Reasoning*, KAIST, arXiv 2506.04301v2 (HPCA-2026)
 - 데이터셋: HotpotQA dev-fullwiki (7,405문항)
 - 코퍼스: Cohere `wikipedia-2023-11-embed-multilingual-v3` (HotpotQA gold-title 필터, 880,777 passages)
+
+---
+
+## 10. Upstash Wikipedia vector DB workspace
+
+Root project is a uv workspace for loading Upstash's English Wikipedia BGE-M3
+embeddings into Qdrant or Milvus. Existing `repro/` project remains excluded and
+independent.
+
+```bash
+uv sync
+
+# First run: choose a large external volume once.
+uv run wikipedia-download --output-dir /Volumes/large-disk/wikipedia
+
+# Interrupted transfer: stored path is reused and Hugging Face resumes files.
+uv run wikipedia-download
+
+# Later commands need no dataset or model path.
+QDRANT_URL=http://localhost:6333 uv run wikipedia-ingest qdrant
+MILVUS_URI=http://localhost:19530 uv run wikipedia-ingest milvus
+```
+
+Full English dataset contains 47,018,430 1024-dimensional records and needs
+roughly 205 GB for download. Reserve additional server-side storage for Qdrant or
+Milvus indexes and payloads. Their credentials and storage directories are separate
+from bundle directory.
+
+### Bundle selection and bounded runs
+
+`wikipedia-download --output-dir` atomically writes untracked
+`.wikipedia.local.toml` before transfer. File is machine-specific and may be
+inspected or edited manually; `bundle_dir` must be absolute. Resolution order is:
+explicit `--bundle-dir`, `WIKIPEDIA_BUNDLE_DIR`, then marker. Choosing a new output
+directory updates marker without moving or deleting old bundle.
+
+```bash
+# Small development bundle, marked partial but valid.
+uv run wikipedia-download --output-dir "/Volumes/External Disk/wiki" --max-shards 2
+
+# Bound an import independently.
+uv run wikipedia-ingest qdrant --max-shards 1 --max-records 10000 --batch-size 256
+
+# One-run bundle override.
+uv run wikipedia-ingest milvus --bundle-dir /another/wiki
+```
+
+Downloader honors `HF_TOKEN`, `--max-workers`, `--dataset-revision`, and
+`--model-revision`. Qdrant reads `QDRANT_URL`, `QDRANT_API_KEY`, and
+`QDRANT_COLLECTION`; Milvus reads `MILVUS_URI`, `MILVUS_TOKEN`,
+`MILVUS_DB_NAME`, and `MILVUS_COLLECTION`. Checkpoints live in bundle `state/`
+unless `--checkpoint` is supplied.
+
+### Python search API
+
+```python
+from wikipedia import QdrantConfig, QdrantVectorDB
+
+with QdrantVectorDB(QdrantConfig(url="http://localhost:6333")) as db:
+    db.ensure_collection()
+    vector_hits = db.search_vector([0.0] * 1024, limit=5)
+    text_hits = db.search_text("What causes auroras?", limit=5)
+```
+
+Text search lazily loads pinned local BGE-M3 with normalized float32 query vectors;
+ingestion and vector-only search never load encoder. Dataset embeddings are inserted
+unchanged. No filters, reranking, sparse, or hybrid search are included.

@@ -1,0 +1,32 @@
+[project]
+name = "wikipedia-vectordb"
+version = "0.1.0"
+description = "Local Upstash Wikipedia embeddings, BGE-M3, and vector database ingestion"
+requires-python = "==3.13.*"
+dependencies = [
+    "datasets>=3.0",
+    "huggingface-hub>=0.27",
+    "numpy>=2.1",
+    "pyarrow>=18",
+    "pymilvus>=2.5",
+    "qdrant-client>=1.12",
+    "sentence-transformers>=3.3",
+]
+
+[project.scripts]
+wikipedia-download = "wikipedia.download:main"
+wikipedia-ingest = "wikipedia.cli:main"
+
+[dependency-groups]
+test = ["pytest>=8.3"]
+
+[build-system]
+requires = ["uv_build>=0.9.11,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "wikipedia"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires a live external service"]

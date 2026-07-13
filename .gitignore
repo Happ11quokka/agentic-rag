@@ -16,6 +16,7 @@ trace.txt
 
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 .venv/
 *.egg-info/
@@ -33,3 +34,6 @@ repro/setup/llama.cpp.build/
 
 # Claude Code local state
 .claude/
+
+# Machine-local Wikipedia bundle pointer
+.wikipedia.local.toml
