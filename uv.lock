@@ -1515,11 +1515,6 @@ dependencies = [
     { name = "sentence-transformers" },
 ]
 
-[package.dev-dependencies]
-test = [
-    { name = "pytest" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "datasets", specifier = ">=3.0" },
@@ -1530,9 +1525,6 @@ requires-dist = [
     { name = "qdrant-client", specifier = ">=1.12" },
     { name = "sentence-transformers", specifier = ">=3.3" },
 ]
-
-[package.metadata.requires-dev]
-test = [{ name = "pytest", specifier = ">=8.3" }]
 
 [[package]]
 name = "xxhash"

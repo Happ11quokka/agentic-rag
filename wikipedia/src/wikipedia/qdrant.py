@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import VectorDB
-from .types import EncoderConfig, SearchResult, WikipediaRecord
+from .types import SearchResult, WikipediaRecord
 
 POINT_NAMESPACE = uuid.uuid5(
     uuid.NAMESPACE_URL, "https://huggingface.co/datasets/Upstash/wikipedia-2024-06-bge-m3/en"
@@ -49,11 +49,9 @@ class QdrantVectorDB(VectorDB):
     def __init__(
         self,
         config: QdrantConfig,
-        encoder_config: EncoderConfig | None = None,
         *,
         client: Any = None,
     ) -> None:
-        super().__init__(encoder_config)
         self.config = config
         self.dimension = config.dimension
         if client is None:
@@ -128,7 +126,7 @@ class QdrantVectorDB(VectorDB):
             raise RuntimeError(f"Qdrant upsert was not acknowledged as completed: {status}")
         return len(records)
 
-    def search_vector(self, vector: Any, *, limit: int = 10) -> list[SearchResult]:
+    def search(self, vector: Any, *, limit: int = 10) -> list[SearchResult]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
         response = self.client.query_points(

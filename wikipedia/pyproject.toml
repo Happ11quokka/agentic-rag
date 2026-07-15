@@ -17,16 +17,9 @@ dependencies = [
 wikipedia-download = "wikipedia.download:main"
 wikipedia-ingest = "wikipedia.cli:main"
 
-[dependency-groups]
-test = ["pytest>=8.3"]
-
 [build-system]
 requires = ["uv_build>=0.9.11,<0.10.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "wikipedia"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = ["integration: requires a live external service"]

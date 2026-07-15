@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .base import VectorDB
-from .types import EncoderConfig, SearchResult, WikipediaRecord
+from .types import SearchResult, WikipediaRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,11 +45,9 @@ class MilvusVectorDB(VectorDB):
     def __init__(
         self,
         config: MilvusConfig,
-        encoder_config: EncoderConfig | None = None,
         *,
         client: Any = None,
     ) -> None:
-        super().__init__(encoder_config)
         self.config = config
         self.dimension = config.dimension
         self._loaded = False
@@ -223,7 +221,7 @@ class MilvusVectorDB(VectorDB):
             )
             self._loaded = True
 
-    def search_vector(self, vector: Any, *, limit: int = 10) -> list[SearchResult]:
+    def search(self, vector: Any, *, limit: int = 10) -> list[SearchResult]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
         self._load()

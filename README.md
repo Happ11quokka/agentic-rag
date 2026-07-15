@@ -269,14 +269,16 @@ unless `--checkpoint` is supplied.
 ### Python search API
 
 ```python
-from wikipedia import QdrantConfig, QdrantVectorDB
+from wikipedia import Encoder, QdrantConfig, QdrantVectorDB, search_text
 
+encoder = Encoder()  # Eagerly load pinned local BGE-M3 before serving queries.
 with QdrantVectorDB(QdrantConfig(url="http://localhost:6333")) as db:
     db.ensure_collection()
-    vector_hits = db.search_vector([0.0] * 1024, limit=5)
-    text_hits = db.search_text("What causes auroras?", limit=5)
+    vector_hits = db.search([0.0] * 1024, limit=5)
+    text_hits = search_text(db, encoder, "What causes auroras?", limit=5)
 ```
 
-Text search lazily loads pinned local BGE-M3 with normalized float32 query vectors;
-ingestion and vector-only search never load encoder. Dataset embeddings are inserted
-unchanged. No filters, reranking, sparse, or hybrid search are included.
+`Encoder` supports pinned local BGE-M3 only and loads it eagerly, making model startup
+explicit instead of adding cold-start work to the first text query. Ingestion and
+vector-only search never load the encoder. Dataset embeddings are inserted unchanged.
+No filters, reranking, sparse, or hybrid search are included.

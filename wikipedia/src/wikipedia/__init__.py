@@ -1,21 +1,22 @@
 from .base import VectorDB
 from .bundle import BundleError, BundlePaths
-from .dataset import WikipediaDataset
+from .encoder import Encoder, search_text
+from .ingest import ingest_wikipedia
 from .milvus import MilvusConfig, MilvusVectorDB
 from .qdrant import QdrantConfig, QdrantVectorDB
-from .types import EncoderConfig, IngestConfig, SearchResult, WikipediaRecord
+from .types import SearchResult, WikipediaRecord
 
 __all__ = [
     "BundleError",
     "BundlePaths",
-    "EncoderConfig",
-    "IngestConfig",
+    "Encoder",
     "MilvusConfig",
     "MilvusVectorDB",
     "QdrantConfig",
     "QdrantVectorDB",
     "SearchResult",
     "VectorDB",
-    "WikipediaDataset",
     "WikipediaRecord",
+    "ingest_wikipedia",
+    "search_text",
 ]

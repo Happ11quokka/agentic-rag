@@ -4,11 +4,9 @@ import argparse
 import os
 from pathlib import Path
 
-from .dataset import WikipediaDataset
-from .ingest import endpoint_fingerprint, ingest_dataset
+from .ingest import endpoint_fingerprint, ingest_wikipedia
 from .milvus import MilvusConfig, MilvusVectorDB
 from .qdrant import QdrantConfig, QdrantVectorDB
-from .types import IngestConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,13 +31,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    dataset = WikipediaDataset(args.bundle_dir)
-    ingest = IngestConfig(
-        batch_size=args.batch_size,
-        checkpoint_path=args.checkpoint,
-        max_shards=args.max_shards,
-        max_records=args.max_records,
-    )
     if args.backend == "qdrant":
         url = args.url or os.environ.get("QDRANT_URL")
         if not url and args.path is None:
@@ -73,14 +64,17 @@ def main(argv: list[str] | None = None) -> None:
         f"endpoint_fingerprint={endpoint_fingerprint(config.endpoint)}"
     )
     with database:
-        count = ingest_dataset(
+        count = ingest_wikipedia(
             database,
-            dataset,
+            args.bundle_dir,
             backend=args.backend,
             endpoint=config.endpoint,
             collection=config.collection_name,
             metric=metric,
-            config=ingest,
+            batch_size=args.batch_size,
+            checkpoint_path=args.checkpoint,
+            max_shards=args.max_shards,
+            max_records=args.max_records,
         )
     print(f"Ingested {count} records")
 
