@@ -225,43 +225,66 @@ independent.
 ```bash
 uv sync
 
-# First run: choose a large external volume once.
-uv run wikipedia-download --output-dir /Volumes/large-disk/wikipedia
+# First run: choose one persistent bundle directory.
+uv run wikipedia-ingest qdrant --bundle-dir /Volumes/large-disk/wikipedia
 
-# Interrupted transfer: stored path is reused and Hugging Face resumes files.
-uv run wikipedia-download
+# Interrupted run: bundle path, Qdrant settings, downloads, and checkpoints are reused.
+uv run wikipedia-ingest qdrant
+uv run wikipedia-inspect
 
-# Later commands need no dataset or model path.
-QDRANT_URL=http://localhost:6333 uv run wikipedia-ingest qdrant
+# Remote Milvus remains environment-configured.
 MILVUS_URI=http://localhost:19530 uv run wikipedia-ingest milvus
 ```
 
-Full English dataset contains 47,018,430 1024-dimensional records and needs
-roughly 205 GB for download. Reserve additional server-side storage for Qdrant or
-Milvus indexes and payloads. Their credentials and storage directories are separate
-from bundle directory.
+Full English dataset contains 47,018,430 1024-dimensional records and transfers
+roughly 205 GB. Ingestion downloads one Parquet shard at a time, checkpoints it,
+then deletes it. Raw source storage therefore holds at most one shard plus the
+retained BGE-M3 model. Local Qdrant data is created under `bundle_dir/qdrant`
+and grows independently with the index and payloads.
 
 ### Bundle selection and bounded runs
 
-`wikipedia-download --output-dir` atomically writes untracked
-`.wikipedia.local.toml` before transfer. File is machine-specific and may be
-inspected or edited manually; `bundle_dir` must be absolute. Resolution order is:
-explicit `--bundle-dir`, `WIKIPEDIA_BUNDLE_DIR`, then marker. Choosing a new output
-directory updates marker without moving or deleting old bundle.
+`wikipedia-ingest --bundle-dir` atomically writes untracked
+`.wikipedia.local.toml` before transfer. Path must be absolute and becomes default
+for later commands. Resolution order is explicit `--bundle-dir`,
+`WIKIPEDIA_BUNDLE_DIR`, then marker. Choosing a new directory updates marker
+without moving or deleting old bundle.
 
 ```bash
-# Small development bundle, marked partial but valid.
-uv run wikipedia-download --output-dir "/Volumes/External Disk/wiki" --max-shards 2
+# Small development ingest, marked partial but valid.
+uv run wikipedia-ingest qdrant \
+  --bundle-dir "/Volumes/External Disk/wiki" \
+  --max-shards 2
 
 # Bound an import independently.
 uv run wikipedia-ingest qdrant --max-shards 1 --max-records 10000 --batch-size 256
 
-# One-run bundle override.
+# Select and remember another bundle directory.
 uv run wikipedia-ingest milvus --bundle-dir /another/wiki
 ```
 
-Downloader honors `HF_TOKEN`, `--max-workers`, `--dataset-revision`, and
-`--model-revision`. Qdrant reads `QDRANT_URL`, `QDRANT_API_KEY`, and
+Ingest honors `HF_TOKEN`, `--max-workers`, `--dataset-revision`, and
+`--model-revision`. It prints 30-second download and ingestion heartbeats. For a
+faster transfer on a machine with spare CPU, disk, and network capacity, enable
+hf-xet's high-performance mode:
+
+```bash
+uv run wikipedia-ingest qdrant --max-workers 16 --high-performance
+```
+
+If hf-xet repeatedly stops making progress, rerun with resumable HTTP and an
+explicit stall timeout. Existing completed and partial files are reused:
+
+```bash
+uv run wikipedia-ingest qdrant --disable-xet --download-timeout 30
+```
+
+Completed shards are recorded per backend before deletion. A failed or
+`--max-records`-limited shard remains on disk and is replayed on resume. Use
+`--progress-interval 10` for more frequent heartbeat output or `0` to disable it.
+When migrating an older multi-shard bundle, ingest retains only the earliest
+pending shard and deletes surplus raw Parquet files to enforce the same limit.
+Qdrant reads `QDRANT_URL`, `QDRANT_API_KEY`, and
 `QDRANT_COLLECTION`; Milvus reads `MILVUS_URI`, `MILVUS_TOKEN`,
 `MILVUS_DB_NAME`, and `MILVUS_COLLECTION`. Checkpoints live in bundle `state/`
 unless `--checkpoint` is supplied.

@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [project.scripts]
-wikipedia-download = "wikipedia.download:main"
 wikipedia-ingest = "wikipedia.cli:main"
+wikipedia-inspect = "wikipedia.inspect:main"
 
 [build-system]
 requires = ["uv_build>=0.9.11,<0.10.0"]

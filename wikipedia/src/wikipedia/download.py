@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-import argparse
 import fnmatch
 import os
+import sys
+import threading
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .bundle import BundlePaths, atomic_json, write_bundle_marker
+from .bundle import BundlePaths, atomic_json, load_manifest
 
 DATASET_REPOSITORY = "Upstash/wikipedia-2024-06-bge-m3"
 DATASET_REVISION = "ce4e0ea49276d99975816b8bc85a85bf416b8b62"
@@ -34,129 +38,269 @@ MODEL_IGNORE_PATTERNS = [
 ]
 
 
-def download_bundle(
-    output_dir: str | Path | None = None,
+def status(message: str) -> None:
+    print(f"[wikipedia-ingest] {message}", file=sys.stderr, flush=True)
+
+
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    raise AssertionError("unreachable")
+
+
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _local_progress(root: Path, files: Sequence[str] | None) -> tuple[int, int]:
+    if files is None:
+        completed = [
+            path for path in root.rglob("*") if path.is_file() and ".cache" not in path.parts
+        ]
+    else:
+        completed = [root / name for name in files if (root / name).is_file()]
+    partial = root / ".cache" / "huggingface" / "download"
+    partial_bytes = (
+        sum(_size(path) for path in partial.rglob("*.incomplete") if path.is_file())
+        if partial.is_dir()
+        else 0
+    )
+    return len(completed), sum(_size(path) for path in completed) + partial_bytes
+
+
+@contextmanager
+def progress_heartbeat(
+    label: str,
+    interval: float,
+    detail: Callable[[], str] | None = None,
+) -> Iterator[None]:
+    if interval == 0:
+        yield
+        return
+
+    stopped = threading.Event()
+    started = time.monotonic()
+
+    def report() -> None:
+        while not stopped.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            suffix = f", {detail()}" if detail is not None else ""
+            status(
+                f"{label}: still running ({elapsed // 60:02d}:{elapsed % 60:02d})"
+                f"{suffix}"
+            )
+
+    thread = threading.Thread(target=report, name=f"{label}-progress", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join()
+
+
+def _configure_transfer(
+    *,
+    max_workers: int,
+    progress_interval: float,
+    download_timeout: int | None,
+    high_performance: bool,
+    disable_xet: bool,
+) -> None:
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+    if progress_interval < 0:
+        raise ValueError("progress_interval must not be negative")
+    if download_timeout is not None and download_timeout < 1:
+        raise ValueError("download_timeout must be at least 1")
+    if high_performance and disable_xet:
+        raise ValueError("high_performance and disable_xet cannot be used together")
+
+    if download_timeout is not None:
+        os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(download_timeout)
+    if high_performance:
+        os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
+    if disable_xet:
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+
+def prepare_bundle(
+    paths: BundlePaths,
     *,
     dataset_revision: str = DATASET_REVISION,
     model_revision: str = MODEL_REVISION,
     max_workers: int = 8,
     max_shards: int | None = None,
+    progress_interval: float = 30,
+    download_timeout: int | None = None,
+    high_performance: bool = False,
+    disable_xet: bool = False,
     token: str | None = None,
     api: Any = None,
-    snapshot: Any = None,
 ) -> dict[str, Any]:
-    if max_workers < 1:
-        raise ValueError("max_workers must be at least 1")
     if max_shards is not None and max_shards < 1:
         raise ValueError("max_shards must be at least 1")
-
-    if output_dir is not None:
-        absolute = Path(output_dir).expanduser()
-        if not absolute.is_absolute():
-            raise ValueError("--output-dir must be an absolute path")
-        absolute = absolute.resolve()
-        absolute.mkdir(parents=True, exist_ok=True)
-        write_bundle_marker(absolute)
-        paths = BundlePaths.from_dir(absolute)
-    else:
-        paths = BundlePaths.resolve()
+    _configure_transfer(
+        max_workers=max_workers,
+        progress_interval=progress_interval,
+        download_timeout=download_timeout,
+        high_performance=high_performance,
+        disable_xet=disable_xet,
+    )
 
     paths.dataset_dir.mkdir(parents=True, exist_ok=True)
     paths.model_dir.mkdir(parents=True, exist_ok=True)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
-    paths.manifest_path.unlink(missing_ok=True)
 
-    if api is None or snapshot is None:
-        from huggingface_hub import HfApi, snapshot_download
+    previous: dict[str, Any] = {}
+    if paths.manifest_path.is_file():
+        try:
+            previous = load_manifest(paths, require_complete=False)
+        except Exception:
+            pass
 
-        api = api or HfApi(token=token)
-        snapshot = snapshot or snapshot_download
+    if api is None:
+        from huggingface_hub import HfApi, constants
 
-    dataset_info = api.dataset_info(DATASET_REPOSITORY, revision=dataset_revision)
-    model_info = api.model_info(MODEL_REPOSITORY, revision=model_revision)
-    resolved_dataset_revision = dataset_info.sha
-    resolved_model_revision = model_info.sha
+        if download_timeout is not None:
+            constants.HF_HUB_DOWNLOAD_TIMEOUT = download_timeout
+        if high_performance:
+            constants.HF_XET_HIGH_PERFORMANCE = True
+        if disable_xet:
+            constants.HF_HUB_DISABLE_XET = True
+        api = HfApi(token=token)
+
+    status(f"bundle directory: {paths.bundle_dir}")
+    status("resolving pinned dataset and model revisions")
+    info_options = {"timeout": download_timeout} if download_timeout is not None else {}
+    dataset_info = api.dataset_info(
+        DATASET_REPOSITORY, revision=dataset_revision, **info_options
+    )
+    model_info = api.model_info(MODEL_REPOSITORY, revision=model_revision, **info_options)
     files = api.list_repo_files(
-        DATASET_REPOSITORY, revision=resolved_dataset_revision, repo_type="dataset"
+        DATASET_REPOSITORY, revision=dataset_info.sha, repo_type="dataset"
     )
     shards = sorted(name for name in files if fnmatch.fnmatch(name, DATASET_PATTERN))
     if not shards:
         raise RuntimeError(f"No files matched {DATASET_PATTERN} in {DATASET_REPOSITORY}")
-    selected_shards = shards[:max_shards]
+    selected = shards[:max_shards]
 
-    common = {"token": token, "max_workers": max_workers}
-    snapshot(
-        repo_id=DATASET_REPOSITORY,
-        repo_type="dataset",
-        revision=resolved_dataset_revision,
-        local_dir=paths.bundle_dir / "dataset",
-        allow_patterns=selected_shards,
-        **common,
-    )
-    snapshot(
-        repo_id=MODEL_REPOSITORY,
-        repo_type="model",
-        revision=resolved_model_revision,
-        local_dir=paths.model_dir,
-        allow_patterns=MODEL_ALLOW_PATTERNS,
-        ignore_patterns=MODEL_IGNORE_PATTERNS,
-        **common,
-    )
-
-    missing = [name for name in selected_shards if not (paths.bundle_dir / "dataset" / name).is_file()]
-    if missing:
-        raise RuntimeError(f"Downloaded dataset shard is missing: {missing[0]}")
-    if not any(path.is_file() for path in paths.model_dir.rglob("*")):
-        raise RuntimeError(f"Downloaded model directory is empty: {paths.model_dir}")
-
-    manifest = {
+    manifest: dict[str, Any] = {
         "schema_version": 1,
-        "status": "complete",
-        "created_at": datetime.now(UTC).isoformat(),
+        "status": "incomplete",
+        "created_at": previous.get("created_at", datetime.now(UTC).isoformat()),
         "language": "en",
-        "partial": len(selected_shards) < len(shards),
+        "partial": len(selected) < len(shards),
         "dataset": {
             "repository": DATASET_REPOSITORY,
             "requested_revision": dataset_revision,
-            "resolved_revision": resolved_dataset_revision,
-            "shards": [f"dataset/{name}" for name in selected_shards],
-            "selected_shard_count": len(selected_shards),
+            "resolved_revision": dataset_info.sha,
+            "retention": "ephemeral",
+            "shards": [f"dataset/{name}" for name in selected],
+            "selected_shard_count": len(selected),
             "available_shard_count": len(shards),
         },
         "model": {
             "repository": MODEL_REPOSITORY,
             "requested_revision": model_revision,
-            "resolved_revision": resolved_model_revision,
+            "resolved_revision": model_info.sha,
             "path": str(paths.model_dir.relative_to(paths.bundle_dir)),
         },
     }
+    if isinstance(previous.get("qdrant"), dict):
+        manifest["qdrant"] = previous["qdrant"]
     atomic_json(paths.manifest_path, manifest)
+    status(f"dataset: {len(selected)}/{len(shards)} shards selected")
     return manifest
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Download English Wikipedia vectors and BGE-M3")
-    parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--dataset-revision", default=DATASET_REVISION)
-    parser.add_argument("--model-revision", default=MODEL_REVISION)
-    parser.add_argument("--max-workers", type=int, default=8)
-    parser.add_argument("--max-shards", type=int)
-    return parser
+def download_dataset_shard(
+    paths: BundlePaths,
+    filename: str,
+    *,
+    revision: str,
+    progress_interval: float,
+    download_timeout: int | None,
+    token: str | None,
+    downloader: Any = None,
+) -> Path:
+    if downloader is None:
+        from huggingface_hub import hf_hub_download
 
+        downloader = hf_hub_download
 
-def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
-    manifest = download_bundle(
-        args.output_dir,
-        dataset_revision=args.dataset_revision,
-        model_revision=args.model_revision,
-        max_workers=args.max_workers,
-        max_shards=args.max_shards,
-        token=os.environ.get("HF_TOKEN"),
+    root = paths.bundle_dir / "dataset"
+    destination = root / filename
+    completed, size = _local_progress(root, [filename])
+    status(
+        f"downloading {filename}: {completed}/1 files complete, "
+        f"{_format_bytes(size)} on disk"
     )
-    kind = "partial" if manifest["partial"] else "full"
-    print(f"Wikipedia bundle ready ({kind}, {manifest['dataset']['selected_shard_count']} shards)")
+    kwargs: dict[str, Any] = {
+        "repo_id": DATASET_REPOSITORY,
+        "repo_type": "dataset",
+        "revision": revision,
+        "filename": filename,
+        "local_dir": root,
+        "token": token,
+    }
+    if download_timeout is not None:
+        kwargs["etag_timeout"] = download_timeout
+
+    def detail() -> str:
+        count, current = _local_progress(root, [filename])
+        return f"{count}/1 files complete, {_format_bytes(current)} on disk"
+
+    with progress_heartbeat(f"download {filename}", progress_interval, detail):
+        downloader(**kwargs)
+    if not destination.is_file():
+        raise RuntimeError(f"Downloaded dataset shard is missing: {destination}")
+    return destination
 
 
-if __name__ == "__main__":
-    main()
+def download_model(
+    paths: BundlePaths,
+    *,
+    revision: str,
+    max_workers: int,
+    progress_interval: float,
+    download_timeout: int | None,
+    token: str | None,
+    snapshot: Any = None,
+) -> None:
+    if snapshot is None:
+        from huggingface_hub import snapshot_download
+
+        snapshot = snapshot_download
+
+    status("dataset ingestion complete; ensuring BGE-M3 model")
+    kwargs: dict[str, Any] = {
+        "repo_id": MODEL_REPOSITORY,
+        "repo_type": "model",
+        "revision": revision,
+        "local_dir": paths.model_dir,
+        "allow_patterns": MODEL_ALLOW_PATTERNS,
+        "ignore_patterns": MODEL_IGNORE_PATTERNS,
+        "token": token,
+        "max_workers": max_workers,
+    }
+    if download_timeout is not None:
+        kwargs["etag_timeout"] = download_timeout
+
+    def detail() -> str:
+        count, size = _local_progress(paths.model_dir, None)
+        return f"{count} files complete, {_format_bytes(size)} on disk"
+
+    with progress_heartbeat("model download", progress_interval, detail):
+        snapshot(**kwargs)
+    if not any(
+        path.is_file() and ".cache" not in path.parts
+        for path in paths.model_dir.rglob("*")
+    ):
+        raise RuntimeError(f"Downloaded model directory is empty: {paths.model_dir}")

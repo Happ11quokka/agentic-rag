@@ -85,12 +85,12 @@ class BundlePaths:
             if not paths.bundle_dir.is_dir():
                 raise BundleError(
                     f"Configured Wikipedia bundle does not exist: {paths.bundle_dir}. "
-                    "Run `uv run wikipedia-download --output-dir /absolute/path`."
+                    "Run `uv run wikipedia-ingest BACKEND --bundle-dir /absolute/path`."
                 )
             return paths
         raise BundleError(
-            "Wikipedia bundle is not configured. Run "
-            "`uv run wikipedia-download --output-dir /absolute/path`."
+            "Wikipedia bundle is not configured. Run `uv run wikipedia-ingest BACKEND "
+            "--bundle-dir /absolute/path`."
         )
 
 
@@ -128,12 +128,14 @@ def load_manifest(paths: BundlePaths, *, require_complete: bool = True) -> dict[
         if require_complete:
             raise BundleError(
                 f"Bundle manifest is missing or incomplete at {paths.manifest_path}. "
-                "Resume with `uv run wikipedia-download`."
+                "Resume with `uv run wikipedia-ingest BACKEND`."
             ) from exc
         raise
-    if manifest.get("schema_version") != 1 or manifest.get("status") != "complete":
+    if manifest.get("schema_version") != 1:
+        raise BundleError(f"Unsupported bundle manifest at {paths.manifest_path}.")
+    if require_complete and manifest.get("status") != "complete":
         raise BundleError(
             f"Bundle manifest is incomplete at {paths.manifest_path}. "
-            "Resume with `uv run wikipedia-download`."
+            "Resume with `uv run wikipedia-ingest BACKEND`."
         )
     return manifest
