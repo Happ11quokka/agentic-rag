@@ -237,10 +237,15 @@ MILVUS_URI=http://localhost:19530 uv run wikipedia-ingest milvus
 ```
 
 Full English dataset contains 47,018,430 1024-dimensional records and transfers
-roughly 205 GB. Ingestion downloads one Parquet shard at a time, checkpoints it,
-then deletes it. Raw source storage therefore holds at most one shard plus the
-retained BGE-M3 model. Local Qdrant data is created under `bundle_dir/qdrant`
-and grows independently with the index and payloads.
+roughly 205 GB. Remote Qdrant ingestion runs one download-and-upsert pipeline per
+worker. Each worker checkpoints and deletes its current Parquet shard before
+claiming another, so raw source storage holds at most `--max-workers` complete
+shards plus resumable partial files and the retained BGE-M3 model. Milvus and
+embedded Qdrant (`--path`) remain serial. Local Qdrant data is created under
+`bundle_dir/qdrant` and grows independently with the index and payloads. Qdrant
+storage must use a POSIX-compatible filesystem with block-level access, such as
+APFS or ext4; ExFAT, NTFS, and network filesystems are rejected before Qdrant
+starts.
 
 ### Bundle selection and bounded runs
 
@@ -264,12 +269,25 @@ uv run wikipedia-ingest milvus --bundle-dir /another/wiki
 ```
 
 Ingest honors `HF_TOKEN`, `--max-workers`, `--dataset-revision`, and
-`--model-revision`. It prints 30-second download and ingestion heartbeats. For a
-faster transfer on a machine with spare CPU, disk, and network capacity, enable
-hf-xet's high-performance mode:
+`--model-revision`. `--max-workers` defaults to 4 and controls remote Qdrant
+shard pipelines plus the final model snapshot download. It prints 30-second
+download and ingestion heartbeats. Parallel Hugging Face progress bars are
+suppressed in favor of one aggregate ingest heartbeat showing checkpointed and
+active shards plus records written. `Ctrl-C` stops all workers, aborts active
+transfers, and retains incomplete shards for resume. For a faster transfer on a
+machine with spare CPU, disk, and network capacity, enable hf-xet's
+high-performance mode:
 
 ```bash
 uv run wikipedia-ingest qdrant --max-workers 16 --high-performance
+```
+
+Store Qdrant vectors as native float16 to halve vector storage. Repeat the flag
+on resumed runs; changing it requires cleaning up the existing Qdrant storage
+and removing the `qdrant` section from `manifest.json` first.
+
+```bash
+uv run wikipedia-ingest qdrant --float16
 ```
 
 If hf-xet repeatedly stops making progress, rerun with resumable HTTP and an
@@ -282,9 +300,9 @@ uv run wikipedia-ingest qdrant --disable-xet --download-timeout 30
 Completed shards are recorded per backend before deletion. A failed or
 `--max-records`-limited shard remains on disk and is replayed on resume. Use
 `--progress-interval 10` for more frequent heartbeat output or `0` to disable it.
-When migrating an older multi-shard bundle, ingest retains only the earliest
-pending shard and deletes surplus raw Parquet files to enforce the same limit.
-Qdrant reads `QDRANT_URL`, `QDRANT_API_KEY`, and
+When migrating an older multi-shard bundle, ingest retains up to the active
+ingest-worker count and deletes surplus raw Parquet files to enforce the same
+bound. Qdrant reads `QDRANT_URL`, `QDRANT_API_KEY`, and
 `QDRANT_COLLECTION`; Milvus reads `MILVUS_URI`, `MILVUS_TOKEN`,
 `MILVUS_DB_NAME`, and `MILVUS_COLLECTION`. Checkpoints live in bundle `state/`
 unless `--checkpoint` is supplied.

@@ -20,6 +20,7 @@ class QdrantConfig:
     path: str | Path | None = None
     api_key: str | None = None
     collection_name: str = "wikipedia_2024_06_bge_m3_en_v1"
+    float16: bool = False
     prefer_grpc: bool = False
     grpc_port: int | None = None
     timeout: float = 60.0
@@ -84,6 +85,11 @@ class QdrantVectorDB(VectorDB):
                     size=self.dimension,
                     distance=getattr(models.Distance, self.config.distance.upper()),
                     on_disk=self.config.on_disk,
+                    datatype=(
+                        models.Datatype.FLOAT16
+                        if self.config.float16
+                        else models.Datatype.FLOAT32
+                    ),
                 ),
                 hnsw_config=models.HnswConfigDiff(on_disk=self.config.hnsw_on_disk),
             )
@@ -93,11 +99,19 @@ class QdrantVectorDB(VectorDB):
         if isinstance(vectors, dict):
             raise ValueError("Existing Qdrant collection uses named vectors; expected one vector")
         actual_distance = getattr(vectors.distance, "value", vectors.distance)
-        if vectors.size != self.dimension or str(actual_distance).upper() != self.config.distance.upper():
+        actual_datatype = getattr(vectors, "datatype", None)
+        actual_datatype = getattr(actual_datatype, "value", actual_datatype) or "float32"
+        expected_datatype = "float16" if self.config.float16 else "float32"
+        if (
+            vectors.size != self.dimension
+            or str(actual_distance).upper() != self.config.distance.upper()
+            or str(actual_datatype).lower() != expected_datatype
+        ):
             raise ValueError(
                 f"Existing Qdrant collection mismatch: dimension={vectors.size}, "
-                f"distance={actual_distance}; expected dimension={self.dimension}, "
-                f"distance={self.config.distance.upper()}"
+                f"distance={actual_distance}, datatype={actual_datatype}; expected "
+                f"dimension={self.dimension}, distance={self.config.distance.upper()}, "
+                f"datatype={expected_datatype}. Clean up the existing collection first."
             )
 
     def upsert(self, records: Sequence[WikipediaRecord]) -> int:

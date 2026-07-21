@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,23 @@ def test_prepare_bundle_writes_ephemeral_manifest_and_preserves_qdrant(
     assert manifest["dataset"]["shards"] == ["dataset/data/en/part-000.parquet"]
     assert manifest["qdrant"] == {"storage_dir": "/data/qdrant"}
     assert "dataset: 1/2 shards selected" in capsys.readouterr().err
+
+
+def test_prepare_bundle_disables_huggingface_progress_bars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+
+    download.prepare_bundle(
+        BundlePaths.from_dir(tmp_path),
+        progress_interval=0,
+        api=FakeApi(),
+    )
+
+    from huggingface_hub.utils import are_progress_bars_disabled
+
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert are_progress_bars_disabled()
 
 
 def test_download_shard_and_model_use_separate_destinations(tmp_path: Path) -> None:

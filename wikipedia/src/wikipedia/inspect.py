@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import statistics
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ DEFAULT_QUERY = "What causes auroras?"
 @dataclass(frozen=True, slots=True)
 class BundleSummary:
     paths: BundlePaths
+    complete: bool
     shard_count: int
     completed_shards: int
     dataset_bytes: int
@@ -59,7 +61,7 @@ def _tree_bytes(root: Path) -> int:
 
 def inspect_bundle(bundle_dir: str | Path | None = None) -> BundleSummary:
     paths = BundlePaths.resolve(bundle_dir)
-    manifest = load_manifest(paths, require_complete=True)
+    manifest = load_manifest(paths, require_complete=False)
     declared = manifest.get("dataset", {}).get("shards", [])
     if not isinstance(declared, list) or not declared:
         raise ValueError("Manifest contains no dataset shards")
@@ -87,6 +89,7 @@ def inspect_bundle(bundle_dir: str | Path | None = None) -> BundleSummary:
             completed_shards = len({str(item) for item in completed} & set(declared))
     return BundleSummary(
         paths=paths,
+        complete=manifest.get("status") == "complete",
         shard_count=len(shards),
         completed_shards=completed_shards,
         dataset_bytes=sum(path.stat().st_size for path in shards if path.is_file()),
@@ -146,8 +149,16 @@ def main(argv: list[str] | None = None) -> None:
         paths = BundlePaths.resolve(args.bundle_dir)
         print(f"bundle: inspecting {paths.bundle_dir}", flush=True)
         summary = inspect_bundle(paths.bundle_dir)
+        if not summary.complete:
+            print(
+                "warning: bundle is incomplete; inspection reflects only currently "
+                "ingested data",
+                file=sys.stderr,
+                flush=True,
+            )
+        bundle_status = "complete" if summary.complete else "incomplete"
         print(
-            f"bundle: complete, {summary.completed_shards}/{summary.shard_count} "
+            f"bundle: {bundle_status}, {summary.completed_shards}/{summary.shard_count} "
             f"shards ingested, {_format_bytes(summary.dataset_bytes)} raw data retained"
         )
         print(f"model: {_format_bytes(summary.model_bytes)}")
@@ -175,6 +186,7 @@ def main(argv: list[str] | None = None) -> None:
             url=url,
             api_key=os.environ.get("QDRANT_API_KEY"),
             collection_name=collection,
+            float16=bool(saved.get("float16", False)),
             prefer_grpc=bool(saved.get("prefer_grpc", True)),
             grpc_port=int(saved.get("grpc_port", 6334)),
             timeout=float(saved.get("timeout", 60.0)),
@@ -195,9 +207,17 @@ def main(argv: list[str] | None = None) -> None:
                 f"points={points}, indexed={indexed}, segments={segments}"
             )
 
+            if not summary.complete and summary.model_bytes == 0:
+                print(
+                    "warning: BGE-M3 model is not available; skipping query benchmark",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+
             print("encoder: loading BGE-M3", flush=True)
             encoder_started = time.perf_counter()
-            encoder = Encoder(summary.paths.bundle_dir)
+            encoder = Encoder(summary.paths.bundle_dir, require_complete=False)
             print(f"encoder: ready in {time.perf_counter() - encoder_started:.1f} s")
             print(f"query: {DEFAULT_QUERY!r}, runs={args.runs}, limit={args.limit}")
             latencies, results = benchmark_query(

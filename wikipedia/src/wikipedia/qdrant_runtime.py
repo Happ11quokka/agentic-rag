@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -13,6 +14,54 @@ DEFAULT_QDRANT_URL = "http://localhost:6333"
 DEFAULT_QDRANT_GRPC_PORT = 6334
 DEFAULT_QDRANT_CONTAINER = "wikipedia-qdrant"
 DEFAULT_QDRANT_IMAGE = "qdrant/qdrant:latest"
+
+UNSUPPORTED_QDRANT_FILESYSTEMS = {
+    "cifs",
+    "exfat",
+    "msdos",
+    "nfs",
+    "ntfs",
+    "smbfs",
+    "vfat",
+}
+
+
+def _filesystem_type(path: Path) -> str | None:
+    target = path
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    result = subprocess.run(
+        ["mount"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+
+    resolved = target.resolve()
+    matches: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        match = re.match(r".+ on (.+?) \(([^, )]+)", line)
+        if match is None:
+            match = re.match(r".+ on (.+?) type ([^ ]+)", line)
+        if match is None:
+            continue
+        mount_point = Path(match.group(1))
+        if resolved == mount_point or mount_point in resolved.parents:
+            matches.append((len(mount_point.parts), match.group(2).lower()))
+    return max(matches)[1] if matches else None
+
+
+def _ensure_compatible_storage(storage: Path) -> None:
+    filesystem = _filesystem_type(storage)
+    if filesystem not in UNSUPPORTED_QDRANT_FILESYSTEMS:
+        return
+    raise RuntimeError(
+        f"Qdrant storage {storage} is on {filesystem}, but Qdrant requires "
+        "block-level access on a POSIX-compatible filesystem. Use APFS or ext4 "
+        "storage instead of ExFAT, NTFS, or a network filesystem."
+    )
 
 
 def _url_ready(url: str) -> bool:
@@ -89,6 +138,7 @@ def ensure_qdrant(
     if not storage.is_absolute():
         raise ValueError("Qdrant storage directory must be an absolute path")
     storage = storage.resolve()
+    _ensure_compatible_storage(storage)
     storage.mkdir(parents=True, exist_ok=True)
     _ensure_docker()
 

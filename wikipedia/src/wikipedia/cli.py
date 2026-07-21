@@ -7,9 +7,11 @@ from pathlib import Path
 from .bundle import BundlePaths, atomic_json, write_bundle_marker
 from .download import (
     DATASET_REVISION,
+    DEFAULT_MAX_WORKERS,
     MODEL_REVISION,
     download_model,
     prepare_bundle,
+    status,
 )
 from .ingest import default_checkpoint_path, endpoint_fingerprint, ingest_wikipedia
 from .milvus import MilvusConfig, MilvusVectorDB
@@ -28,7 +30,7 @@ DEFAULT_TIMEOUT = 60.0
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download and ingest Wikipedia vectors with one-shard local storage"
+        description="Download and ingest Wikipedia vectors with bounded local storage"
     )
     parser.add_argument("backend", choices=("qdrant", "milvus"))
     parser.add_argument(
@@ -38,7 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dataset-revision", default=DATASET_REVISION)
     parser.add_argument("--model-revision", default=MODEL_REVISION)
-    parser.add_argument("--max-workers", type=int, default=8)
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=DEFAULT_MAX_WORKERS,
+        help=(
+            "parallel shard pipelines for remote Qdrant and model download workers "
+            f"(default: {DEFAULT_MAX_WORKERS})"
+        ),
+    )
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--max-shards", type=int)
@@ -71,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--url", help="Qdrant URL")
     parser.add_argument("--path", type=Path, help="Local Qdrant storage path")
     parser.add_argument(
+        "--float16",
+        action="store_true",
+        help="store Qdrant vectors as float16 instead of float32",
+    )
+    parser.add_argument(
         "--prefer-grpc",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -83,6 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    try:
+        _main(argv)
+    except KeyboardInterrupt:
+        status("ingestion interrupted; incomplete shards retained for resume")
+        raise SystemExit(130) from None
+
+
+def _main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.bundle_dir is not None:
@@ -111,6 +134,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.backend == "qdrant":
         saved = manifest.get("qdrant")
         saved = saved if isinstance(saved, dict) else {}
+        saved_float16 = bool(saved.get("float16", False))
+        if saved and saved_float16 != args.float16:
+            parser.error(
+                "--float16 does not match saved Qdrant configuration; clean up "
+                "existing Qdrant storage and remove the qdrant manifest section first"
+            )
         saved_url = (
             args.url
             or os.environ.get("QDRANT_URL")
@@ -174,6 +203,7 @@ def main(argv: list[str] | None = None) -> None:
                 "container": container,
                 "image": image,
                 "collection": collection,
+                "float16": args.float16,
                 "prefer_grpc": prefer_grpc,
                 "grpc_port": grpc_port,
                 "batch_size": batch_size,
@@ -185,6 +215,7 @@ def main(argv: list[str] | None = None) -> None:
             path=args.path,
             api_key=os.environ.get("QDRANT_API_KEY"),
             collection_name=collection,
+            float16=args.float16,
             prefer_grpc=prefer_grpc,
             grpc_port=grpc_port,
             timeout=timeout,
@@ -223,6 +254,20 @@ def main(argv: list[str] | None = None) -> None:
         f"Ingesting into {args.backend} collection={config.collection_name} "
         f"endpoint_fingerprint={endpoint_fingerprint(config.endpoint)}"
     )
+    parallel_qdrant = args.backend == "qdrant" and args.path is None
+    ingest_workers = args.max_workers if parallel_qdrant else 1
+    worker_database_factory = (
+        (lambda: QdrantVectorDB(config))
+        if parallel_qdrant and ingest_workers > 1
+        else None
+    )
+    if parallel_qdrant:
+        status(f"ingest workers: {ingest_workers}")
+    else:
+        status(
+            "ingest workers: 1; parallel shard ingestion is only enabled for "
+            "remote Qdrant (--max-workers still controls model download)"
+        )
     with database:
         count = ingest_wikipedia(
             database,
@@ -238,6 +283,8 @@ def main(argv: list[str] | None = None) -> None:
             progress_interval=args.progress_interval,
             download_timeout=args.download_timeout,
             token=os.environ.get("HF_TOKEN"),
+            max_workers=ingest_workers,
+            worker_database_factory=worker_database_factory,
         )
     download_model(
         paths,

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +13,12 @@ import pyarrow.parquet as pq
 
 from .base import VectorDB
 from .bundle import BundlePaths, atomic_json, load_manifest
-from .download import download_dataset_shard, progress_heartbeat, status
+from .download import (
+    cancel_transfers,
+    download_dataset_shard,
+    progress_heartbeat,
+    status,
+)
 from .types import WikipediaRecord
 
 REQUIRED_COLUMNS = ("id", "url", "title", "text", "embedding")
@@ -65,6 +74,8 @@ def ingest_wikipedia(
     download_timeout: int | None = None,
     token: str | None = None,
     downloader: Any = None,
+    max_workers: int = 1,
+    worker_database_factory: Callable[[], VectorDB] | None = None,
 ) -> int:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -72,6 +83,10 @@ def ingest_wikipedia(
         raise ValueError("max_shards must be at least 1")
     if max_records is not None and max_records < 1:
         raise ValueError("max_records must be at least 1")
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+    if max_workers > 1 and worker_database_factory is None:
+        raise ValueError("worker_database_factory is required when max_workers exceeds 1")
 
     paths = BundlePaths.resolve(bundle_dir)
     if progress_interval < 0:
@@ -101,6 +116,7 @@ def ingest_wikipedia(
     checkpoint = Path(checkpoint).expanduser().resolve()
     completed = _load_checkpoint(checkpoint, fingerprint)
     pending: list[tuple[Path, str, str]] = []
+    selected_relatives: set[str] = set()
     for shard in shards:
         try:
             relative = str(shard.relative_to(paths.bundle_dir))
@@ -109,30 +125,93 @@ def ingest_wikipedia(
             raise ValueError(
                 f"Dataset shard is outside bundle directory: {shard}"
             ) from exc
+        selected_relatives.add(relative)
         if relative in completed:
             shard.unlink(missing_ok=True)
         else:
             pending.append((shard, relative, dataset_filename))
 
-    retained = next((shard for shard, _, _ in pending if shard.is_file()), None)
+    existing = [item for item in pending if item[0].is_file()]
+    retained_items = existing[:max_workers]
+    retained_paths = {item[0] for item in retained_items}
     removed = 0
     for local_shard in paths.dataset_dir.rglob("*.parquet"):
-        if retained is None or local_shard.resolve() != retained:
+        if local_shard.resolve() not in retained_paths:
             local_shard.unlink()
             removed += 1
     if removed:
-        status(f"deleted {removed} surplus local shards to enforce one-shard storage")
+        status(
+            f"deleted {removed} surplus local shards to enforce "
+            f"{max_workers}-worker storage bound"
+        )
+
+    retained_relatives = {item[1] for item in retained_items}
+    pending = retained_items + [
+        item for item in pending if item[1] not in retained_relatives
+    ]
 
     database.ensure_collection()
+    if not pending:
+        return 0
     ingested = 0
-
+    reserved = 0
+    state_lock = threading.Lock()
+    checkpoint_lock = threading.Lock()
+    active_lock = threading.Lock()
+    stop = threading.Event()
+    quota_reached = threading.Event()
+    active_shards: set[str] = set()
+    work: queue.Queue[tuple[int, Path, str, str]] = queue.Queue()
     for shard_index, (shard, relative, dataset_filename) in enumerate(pending, 1):
+        work.put((shard_index, shard, relative, dataset_filename))
+
+    def current_ingested() -> int:
+        with state_lock:
+            return ingested
+
+    def reserve_records(size: int) -> int:
+        nonlocal reserved
+        with state_lock:
+            if stop.is_set():
+                return 0
+            if max_records is None:
+                return size
+            remaining = max_records - ingested - reserved
+            claimed = min(size, max(remaining, 0))
+            reserved += claimed
+            if ingested + reserved >= max_records:
+                quota_reached.set()
+                stop.set()
+            return claimed
+
+    def release_reservation(size: int) -> None:
+        nonlocal reserved
+        if max_records is None:
+            return
+        with state_lock:
+            reserved -= size
+
+    def acknowledge(size: int) -> None:
+        nonlocal ingested, reserved
+        with state_lock:
+            if max_records is not None:
+                reserved -= size
+            ingested += size
+
+    def process_shard(
+        worker_database: VectorDB,
+        shard_index: int,
+        shard: Path,
+        relative: str,
+        dataset_filename: str,
+    ) -> None:
+        worker_progress_interval = 0 if max_workers > 1 else progress_interval
         if not shard.is_file():
             download_dataset_shard(
                 paths,
                 dataset_filename,
                 revision=fingerprint["dataset_revision"],
-                progress_interval=progress_interval,
+                progress_interval=worker_progress_interval,
                 download_timeout=download_timeout,
                 token=token,
                 downloader=downloader,
@@ -156,7 +235,7 @@ def ingest_wikipedia(
         def detail() -> str:
             return (
                 f"{shard_progress['records']:,}/{shard_records:,} shard records, "
-                f"{ingested:,} records this run"
+                f"{current_ingested():,} records this run"
             )
 
         status(
@@ -166,12 +245,15 @@ def ingest_wikipedia(
         try:
             with progress_heartbeat(
                 f"ingest shard {shard_index}/{len(pending)}",
-                progress_interval,
+                worker_progress_interval,
                 detail,
             ):
                 for batch in parquet.iter_batches(
                     batch_size=batch_size, columns=list(REQUIRED_COLUMNS)
                 ):
+                    if stop.is_set():
+                        limited = True
+                        break
                     values: dict[str, list[Any]] = {
                         name: batch.column(index).to_pylist()
                         for index, name in enumerate(REQUIRED_COLUMNS)
@@ -198,24 +280,28 @@ def ingest_wikipedia(
                             )
                         )
 
-                    if max_records is not None:
-                        remaining = max_records - ingested
-                        if remaining <= 0:
-                            limited = True
-                            break
-                        if len(records) > remaining:
-                            records = records[:remaining]
-                            limited = True
+                    claimed = reserve_records(len(records))
+                    if claimed == 0:
+                        limited = True
+                        break
+                    if claimed < len(records):
+                        records = records[:claimed]
+                        limited = True
 
-                    acknowledged = database.upsert(records)
-                    if acknowledged != len(records):
+                    try:
+                        acknowledged = worker_database.upsert(records)
+                    except BaseException:
+                        release_reservation(claimed)
+                        raise
+                    if acknowledged != claimed:
+                        release_reservation(claimed)
                         raise RuntimeError(
-                            f"Backend acknowledged {acknowledged} of {len(records)} "
+                            f"Backend acknowledged {acknowledged} of {claimed} "
                             f"records in {relative}"
                         )
-                    ingested += acknowledged
+                    acknowledge(acknowledged)
                     shard_progress["records"] += acknowledged
-                    if max_records is not None and ingested >= max_records:
+                    if max_records is not None and current_ingested() >= max_records:
                         limited = True
                         break
         finally:
@@ -224,15 +310,124 @@ def ingest_wikipedia(
         if limited and shard_progress["records"] == shard_records:
             limited = False
         if limited:
-            status(
-                f"record limit reached; retaining incomplete shard {dataset_filename}"
+            reason = (
+                "record limit reached"
+                if quota_reached.is_set()
+                else "ingestion stopped"
             )
-            break
-        completed.add(relative)
-        atomic_json(checkpoint, {**fingerprint, "completed_shards": sorted(completed)})
+            status(f"{reason}; retaining incomplete shard {dataset_filename}")
+            return
+        with checkpoint_lock:
+            updated = completed | {relative}
+            atomic_json(
+                checkpoint,
+                {**fingerprint, "completed_shards": sorted(updated)},
+            )
+            completed.add(relative)
         shard.unlink()
         status(
             f"shard {shard_index}/{len(pending)} checkpointed and deleted: "
             f"{dataset_filename}"
         )
+
+    def consume(worker_database: VectorDB) -> None:
+        while not stop.is_set():
+            try:
+                shard_index, shard, relative, dataset_filename = work.get_nowait()
+            except queue.Empty:
+                return
+            with active_lock:
+                active_shards.add(relative)
+            try:
+                process_shard(
+                    worker_database,
+                    shard_index,
+                    shard,
+                    relative,
+                    dataset_filename,
+                )
+            finally:
+                with active_lock:
+                    active_shards.discard(relative)
+
+    if max_workers == 1:
+        consume(database)
+    else:
+        assert worker_database_factory is not None
+        first_error: list[BaseException] = []
+        error_lock = threading.Lock()
+        database_lock = threading.Lock()
+        active_databases: list[VectorDB] = []
+
+        def parallel_worker() -> None:
+            worker_database: VectorDB | None = None
+            try:
+                worker_database = worker_database_factory()
+                with database_lock:
+                    active_databases.append(worker_database)
+                with worker_database:
+                    consume(worker_database)
+            except BaseException as exc:
+                with error_lock:
+                    if not first_error:
+                        first_error.append(exc)
+                stop.set()
+            finally:
+                with database_lock:
+                    if worker_database is not None:
+                        active_databases[:] = [
+                            item for item in active_databases if item is not worker_database
+                        ]
+
+        def parallel_detail() -> str:
+            with checkpoint_lock:
+                checkpointed = len(completed & selected_relatives)
+            with active_lock:
+                active = len(active_shards)
+            return (
+                f"{checkpointed}/{len(shards)} shards checkpointed, "
+                f"{active} active, {current_ingested():,} records this run"
+            )
+
+        def stop_parallel_workers() -> None:
+            stop.set()
+            with database_lock:
+                databases = list(active_databases)
+            for worker_database in databases:
+                close = getattr(worker_database, "close", None)
+                if close is not None:
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            cancel_transfers()
+
+        worker_count = min(max_workers, len(pending))
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="wikipedia-ingest",
+        )
+        futures = []
+        interrupted = False
+        try:
+            futures = [executor.submit(parallel_worker) for _ in range(worker_count)]
+            with progress_heartbeat(
+                "parallel ingest",
+                progress_interval,
+                parallel_detail,
+            ):
+                for future in futures:
+                    future.result()
+        except KeyboardInterrupt:
+            interrupted = True
+            status("interrupt received; stopping all ingest workers")
+            stop_parallel_workers()
+            for future in futures:
+                future.cancel()
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+        if interrupted:
+            raise KeyboardInterrupt
+        if first_error:
+            raise first_error[0]
     return ingested

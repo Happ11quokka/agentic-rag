@@ -14,10 +14,14 @@ class Encoder:
     """Eagerly loaded local BGE-M3 encoder."""
 
     def __init__(
-        self, bundle_dir: str | Path | None = None, *, device: str | None = None
+        self,
+        bundle_dir: str | Path | None = None,
+        *,
+        device: str | None = None,
+        require_complete: bool = True,
     ) -> None:
         paths = BundlePaths.resolve(bundle_dir)
-        manifest = load_manifest(paths, require_complete=True)
+        manifest = load_manifest(paths, require_complete=require_complete)
         revision = manifest.get("model", {}).get("resolved_revision")
 
         from sentence_transformers import SentenceTransformer

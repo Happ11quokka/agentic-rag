@@ -36,6 +36,7 @@ MODEL_IGNORE_PATTERNS = [
     "colbert_linear.pt",
     "sparse_linear.pt",
 ]
+DEFAULT_MAX_WORKERS = 4
 
 
 def status(message: str) -> None:
@@ -122,6 +123,13 @@ def _configure_transfer(
     if high_performance and disable_xet:
         raise ValueError("high_performance and disable_xet cannot be used together")
 
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except ImportError:
+        pass
     if download_timeout is not None:
         os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(download_timeout)
     if high_performance:
@@ -130,12 +138,27 @@ def _configure_transfer(
         os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 
+def cancel_transfers() -> None:
+    try:
+        from huggingface_hub.utils import close_session
+
+        close_session()
+    except Exception:
+        pass
+    try:
+        from huggingface_hub.utils._xet import abort_xet_session
+
+        abort_xet_session()
+    except Exception:
+        pass
+
+
 def prepare_bundle(
     paths: BundlePaths,
     *,
     dataset_revision: str = DATASET_REVISION,
     model_revision: str = MODEL_REVISION,
-    max_workers: int = 8,
+    max_workers: int = DEFAULT_MAX_WORKERS,
     max_shards: int | None = None,
     progress_interval: float = 30,
     download_timeout: int | None = None,
