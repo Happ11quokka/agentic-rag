@@ -327,3 +327,16 @@ with QdrantVectorDB(QdrantConfig(url="http://localhost:6333")) as db:
 explicit instead of adding cold-start work to the first text query. Ingestion and
 vector-only search never load the encoder. Dataset embeddings are inserted unchanged.
 No filters, reranking, sparse, or hybrid search are included.
+
+## 11. FanOutQA local Qwen experiment
+
+```bash
+# Download and verify pinned main and draft GGUF files.
+uv run download-models
+
+# Select an experiment interactively, then run it.
+uv run run-experiment
+```
+
+Arguments after `run-experiment` are forwarded to the selected experiment, for
+example `uv run run-experiment --limit 1`.

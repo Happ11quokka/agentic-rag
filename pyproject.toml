@@ -2,13 +2,25 @@
 name = "agentic-rag-workspace"
 version = "0.1.0"
 requires-python = "==3.13.*"
-dependencies = ["wikipedia-vectordb"]
+dependencies = [
+    "httpx>=0.28",
+    "huggingface-hub>=0.27",
+    "wikipedia-vectordb",
+]
+
+[project.scripts]
+download-models = "experiment.setup.cli:download_models"
+run-experiment = "experiment.setup.cli:run_experiment"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 test = ["pytest>=8.3"]
 
 [tool.uv]
-package = false
+package = true
 default-groups = ["test"]
 
 [tool.uv.sources]
@@ -17,3 +29,12 @@ wikipedia-vectordb = { workspace = true }
 [tool.uv.workspace]
 members = ["wikipedia"]
 exclude = ["repro"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["agent*", "experiment*", "fanoutqa*"]
+
+[tool.setuptools.package-data]
+"experiment.setup" = ["*.toml", "*.sh"]

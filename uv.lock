@@ -16,8 +16,10 @@ members = [
 [[package]]
 name = "agentic-rag-workspace"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
+    { name = "huggingface-hub" },
     { name = "wikipedia-vectordb" },
 ]
 
@@ -27,7 +29,11 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "wikipedia-vectordb", editable = "wikipedia" }]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "huggingface-hub", specifier = ">=0.27" },
+    { name = "wikipedia-vectordb", editable = "wikipedia" },
+]
 
 [package.metadata.requires-dev]
 test = [{ name = "pytest", specifier = ">=8.3" }]
