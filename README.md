@@ -251,9 +251,10 @@ starts.
 
 `wikipedia-ingest --bundle-dir` atomically writes untracked
 `.wikipedia.local.toml` before transfer. Path must be absolute and becomes default
-for later commands. Resolution order is explicit `--bundle-dir`,
-`WIKIPEDIA_BUNDLE_DIR`, then marker. Choosing a new directory updates marker
-without moving or deleting old bundle.
+for later commands run from this source clone. Marker is anchored to clone's uv
+workspace even if command is launched with another working directory. Resolution
+order is explicit `--bundle-dir`, `WIKIPEDIA_BUNDLE_DIR`, then marker. Choosing a
+new directory updates marker without moving or deleting old bundle.
 
 ```bash
 # Small development ingest, marked partial but valid.
@@ -270,10 +271,13 @@ uv run wikipedia-ingest milvus --bundle-dir /another/wiki
 
 Ingest honors `HF_TOKEN`, `--max-workers`, `--dataset-revision`, and
 `--model-revision`. `--max-workers` defaults to 4 and controls remote Qdrant
-shard pipelines plus the final model snapshot download. It prints 30-second
-download and ingestion heartbeats. Parallel Hugging Face progress bars are
-suppressed in favor of one aggregate ingest heartbeat showing checkpointed and
-active shards plus records written. `Ctrl-C` stops all workers, aborts active
+shard pipelines plus initial model snapshot download. Before starting Qdrant or
+Milvus, command checks required BGE-M3 files under `bundle_dir/models/bge-m3` and
+downloads or resumes pinned model when files are incomplete or revision changed.
+Complete matching model is reused without another snapshot transfer. It prints
+30-second download and ingestion heartbeats. Parallel Hugging Face progress bars
+are suppressed in favor of one aggregate ingest heartbeat showing checkpointed
+and active shards plus records written. `Ctrl-C` stops all workers, aborts active
 transfers, and retains incomplete shards for resume. For a faster transfer on a
 machine with spare CPU, disk, and network capacity, enable hf-xet's
 high-performance mode:

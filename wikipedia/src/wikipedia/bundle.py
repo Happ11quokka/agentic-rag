@@ -17,8 +17,11 @@ class BundleError(RuntimeError):
 
 
 def find_repository_root(start: Path | None = None) -> Path:
-    candidates = [Path.cwd() if start is None else Path(start)]
-    candidates.append(Path(__file__).resolve())
+    candidates = (
+        [Path(start), Path(__file__).resolve()]
+        if start is not None
+        else [Path(__file__).resolve(), Path.cwd()]
+    )
     for candidate in candidates:
         current = candidate.resolve()
         if current.is_file():
@@ -109,7 +112,7 @@ def _atomic_text(path: Path, content: str) -> None:
 
 
 def write_bundle_marker(bundle_dir: str | Path, repository_root: Path | None = None) -> Path:
-    resolved = _absolute_path(bundle_dir, "--output-dir")
+    resolved = _absolute_path(bundle_dir, "--bundle-dir")
     root = find_repository_root() if repository_root is None else repository_root.resolve()
     escaped = str(resolved).replace("\\", "\\\\").replace('"', '\\"')
     marker = root / MARKER_NAME

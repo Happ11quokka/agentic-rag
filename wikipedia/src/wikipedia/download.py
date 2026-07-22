@@ -36,6 +36,18 @@ MODEL_IGNORE_PATTERNS = [
     "colbert_linear.pt",
     "sparse_linear.pt",
 ]
+MODEL_REQUIRED_FILES = (
+    "1_Pooling/config.json",
+    "config.json",
+    "config_sentence_transformers.json",
+    "modules.json",
+    "sentence_bert_config.json",
+    "sentencepiece.bpe.model",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
+MODEL_WEIGHT_PATTERNS = ("*.safetensors", "pytorch_model*.bin")
 DEFAULT_MAX_WORKERS = 4
 
 
@@ -57,6 +69,23 @@ def _size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _is_nonempty_file(path: Path) -> bool:
+    return path.is_file() and _size(path) > 0
+
+
+def model_is_downloaded(paths: BundlePaths) -> bool:
+    if not all(
+        _is_nonempty_file(paths.model_dir / filename)
+        for filename in MODEL_REQUIRED_FILES
+    ):
+        return False
+    return any(
+        _is_nonempty_file(path)
+        for pattern in MODEL_WEIGHT_PATTERNS
+        for path in paths.model_dir.glob(pattern)
+    )
 
 
 def _local_progress(root: Path, files: Sequence[str] | None) -> tuple[int, int]:
@@ -302,7 +331,7 @@ def download_model(
 
         snapshot = snapshot_download
 
-    status("dataset ingestion complete; ensuring BGE-M3 model")
+    status("ensuring BGE-M3 model before dataset ingestion")
     kwargs: dict[str, Any] = {
         "repo_id": MODEL_REPOSITORY,
         "repo_type": "model",
@@ -322,8 +351,5 @@ def download_model(
 
     with progress_heartbeat("model download", progress_interval, detail):
         snapshot(**kwargs)
-    if not any(
-        path.is_file() and ".cache" not in path.parts
-        for path in paths.model_dir.rglob("*")
-    ):
-        raise RuntimeError(f"Downloaded model directory is empty: {paths.model_dir}")
+    if not model_is_downloaded(paths):
+        raise RuntimeError(f"Downloaded model is incomplete: {paths.model_dir}")

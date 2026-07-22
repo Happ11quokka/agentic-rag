@@ -5,6 +5,7 @@ import pytest
 
 from wikipedia import cli
 from wikipedia.bundle import BundlePaths
+from wikipedia.download import MODEL_REQUIRED_FILES
 
 
 class FakeDatabase:
@@ -36,6 +37,14 @@ def _prepare(paths: BundlePaths) -> dict[str, object]:
     if "qdrant" in previous:
         manifest["qdrant"] = previous["qdrant"]
     return manifest
+
+
+def _write_complete_model(paths: BundlePaths) -> None:
+    for filename in MODEL_REQUIRED_FILES:
+        destination = paths.model_dir / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("complete", encoding="utf-8")
+    (paths.model_dir / "pytorch_model.bin").write_bytes(b"weights")
 
 
 def test_qdrant_ingest_saves_and_reuses_runtime_config(
@@ -97,23 +106,34 @@ def test_embedded_qdrant_keeps_ingest_serial_but_model_download_uses_workers(
     paths = BundlePaths.from_dir(tmp_path)
     ingest_calls: list[dict[str, object]] = []
     model_calls: list[dict[str, object]] = []
+    events: list[str] = []
+
+    def ingest(database: object, bundle_dir: Path, **kwargs: object) -> int:
+        events.append("ingest")
+        ingest_calls.append(kwargs)
+        return 0
+
+    def download(paths: BundlePaths, **kwargs: object) -> None:
+        events.append("model")
+        model_calls.append(kwargs)
+
     monkeypatch.setattr(
         cli.BundlePaths,
         "resolve",
         classmethod(lambda cls, bundle_dir=None: paths),
     )
     monkeypatch.setattr(cli, "prepare_bundle", lambda *args, **kwargs: _prepare(paths))
-    monkeypatch.setattr(cli, "QdrantVectorDB", FakeDatabase)
+    monkeypatch.setattr(
+        cli,
+        "QdrantVectorDB",
+        lambda config: events.append("database") or FakeDatabase(config),
+    )
     monkeypatch.setattr(
         cli,
         "ingest_wikipedia",
-        lambda database, bundle_dir, **kwargs: ingest_calls.append(kwargs) or 0,
+        ingest,
     )
-    monkeypatch.setattr(
-        cli,
-        "download_model",
-        lambda paths, **kwargs: model_calls.append(kwargs),
-    )
+    monkeypatch.setattr(cli, "download_model", download)
 
     cli.main(
         [
@@ -128,6 +148,120 @@ def test_embedded_qdrant_keeps_ingest_serial_but_model_download_uses_workers(
     assert ingest_calls[0]["max_workers"] == 1
     assert ingest_calls[0]["worker_database_factory"] is None
     assert model_calls[0]["max_workers"] == 7
+    assert events == ["model", "database", "ingest"]
+
+
+def test_complete_matching_model_skips_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = BundlePaths.from_dir(tmp_path)
+    paths.bundle_dir.mkdir(parents=True, exist_ok=True)
+    paths.manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "incomplete",
+                "model": {"resolved_revision": "model-sha"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_model(paths)
+    monkeypatch.setattr(
+        cli.BundlePaths,
+        "resolve",
+        classmethod(lambda cls, bundle_dir=None: paths),
+    )
+    monkeypatch.setattr(cli, "prepare_bundle", lambda *args, **kwargs: _prepare(paths))
+    monkeypatch.setattr(
+        cli,
+        "download_model",
+        lambda *args, **kwargs: pytest.fail("complete model should be reused"),
+    )
+    monkeypatch.setattr(cli, "QdrantVectorDB", FakeDatabase)
+    monkeypatch.setattr(cli, "ingest_wikipedia", lambda *args, **kwargs: 0)
+
+    cli.main(["qdrant", "--path", str(tmp_path / "qdrant")])
+
+
+@pytest.mark.parametrize(
+    "recorded_model",
+    [{"resolved_revision": "old-model-sha"}, None],
+    ids=("changed", "unknown"),
+)
+def test_model_revision_mismatch_downloads_before_database_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_model: dict[str, str] | None,
+) -> None:
+    paths = BundlePaths.from_dir(tmp_path)
+    paths.bundle_dir.mkdir(parents=True, exist_ok=True)
+    paths.manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "complete",
+                "model": recorded_model,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_model(paths)
+    events: list[str] = []
+    monkeypatch.setattr(
+        cli.BundlePaths,
+        "resolve",
+        classmethod(lambda cls, bundle_dir=None: paths),
+    )
+    monkeypatch.setattr(cli, "prepare_bundle", lambda *args, **kwargs: _prepare(paths))
+    monkeypatch.setattr(
+        cli,
+        "download_model",
+        lambda *args, **kwargs: events.append("model"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "QdrantVectorDB",
+        lambda config: events.append("database") or FakeDatabase(config),
+    )
+    monkeypatch.setattr(
+        cli,
+        "ingest_wikipedia",
+        lambda *args, **kwargs: events.append("ingest") or 0,
+    )
+
+    cli.main(["qdrant", "--path", str(tmp_path / "qdrant")])
+
+    assert events == ["model", "database", "ingest"]
+
+
+def test_model_download_failure_does_not_start_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = BundlePaths.from_dir(tmp_path)
+    database_started = False
+    monkeypatch.setattr(
+        cli.BundlePaths,
+        "resolve",
+        classmethod(lambda cls, bundle_dir=None: paths),
+    )
+    monkeypatch.setattr(cli, "prepare_bundle", lambda *args, **kwargs: _prepare(paths))
+
+    def fail_download(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("model transfer failed")
+
+    def start_database(config: object) -> FakeDatabase:
+        nonlocal database_started
+        database_started = True
+        return FakeDatabase(config)
+
+    monkeypatch.setattr(cli, "download_model", fail_download)
+    monkeypatch.setattr(cli, "QdrantVectorDB", start_database)
+
+    with pytest.raises(RuntimeError, match="model transfer failed"):
+        cli.main(["qdrant", "--path", str(tmp_path / "qdrant")])
+
+    assert database_started is False
 
 
 def test_default_max_workers_is_four() -> None:
@@ -167,8 +301,8 @@ def test_keyboard_interrupt_exits_cleanly_with_status_130(
         cli.main(["qdrant"])
 
     assert error.value.code == 130
-    assert "incomplete shards retained" in capsys.readouterr().err
-    assert model_downloaded is False
+    assert "incomplete downloads and shards retained" in capsys.readouterr().err
+    assert model_downloaded is True
 
 
 def test_milvus_keeps_ingest_serial(

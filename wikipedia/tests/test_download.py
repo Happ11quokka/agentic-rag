@@ -21,6 +21,14 @@ class FakeApi:
         return ["README.md", "data/en/part-000.parquet", "data/en/part-001.parquet"]
 
 
+def _write_complete_model(paths: BundlePaths) -> None:
+    for filename in download.MODEL_REQUIRED_FILES:
+        destination = paths.model_dir / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("complete", encoding="utf-8")
+    (paths.model_dir / "pytorch_model.bin").write_bytes(b"weights")
+
+
 def test_prepare_bundle_writes_ephemeral_manifest_and_preserves_qdrant(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -95,9 +103,7 @@ def test_download_shard_and_model_use_separate_destinations(tmp_path: Path) -> N
 
     def fake_snapshot(**kwargs: object) -> None:
         calls.append(kwargs)
-        model = Path(kwargs["local_dir"]) / "config.json"
-        model.parent.mkdir(parents=True, exist_ok=True)
-        model.write_text("{}", encoding="utf-8")
+        _write_complete_model(paths)
 
     download.download_model(
         paths,
@@ -114,6 +120,39 @@ def test_download_shard_and_model_use_separate_destinations(tmp_path: Path) -> N
     assert calls[0]["etag_timeout"] == 30
     assert calls[1]["max_workers"] == 4
     assert (paths.model_dir / "config.json").is_file()
+    assert download.model_is_downloaded(paths)
+
+
+def test_model_is_downloaded_rejects_partial_model(tmp_path: Path) -> None:
+    paths = BundlePaths.from_dir(tmp_path)
+    paths.model_dir.mkdir(parents=True)
+    (paths.model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (paths.model_dir / "pytorch_model.bin").write_bytes(b"weights")
+
+    assert not download.model_is_downloaded(paths)
+
+    _write_complete_model(paths)
+
+    assert download.model_is_downloaded(paths)
+
+
+def test_download_model_rejects_incomplete_snapshot(tmp_path: Path) -> None:
+    paths = BundlePaths.from_dir(tmp_path)
+
+    def partial_snapshot(**kwargs: object) -> None:
+        paths.model_dir.mkdir(parents=True)
+        (paths.model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Downloaded model is incomplete"):
+        download.download_model(
+            paths,
+            revision="model-sha",
+            max_workers=1,
+            progress_interval=0,
+            download_timeout=None,
+            token=None,
+            snapshot=partial_snapshot,
+        )
 
 
 def test_local_progress_includes_resumable_partial_bytes(tmp_path: Path) -> None:

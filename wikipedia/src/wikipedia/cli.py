@@ -4,12 +4,13 @@ import argparse
 import os
 from pathlib import Path
 
-from .bundle import BundlePaths, atomic_json, write_bundle_marker
+from .bundle import BundlePaths, atomic_json, load_manifest, write_bundle_marker
 from .download import (
     DATASET_REVISION,
     DEFAULT_MAX_WORKERS,
     MODEL_REVISION,
     download_model,
+    model_is_downloaded,
     prepare_bundle,
     status,
 )
@@ -101,8 +102,20 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _main(argv)
     except KeyboardInterrupt:
-        status("ingestion interrupted; incomplete shards retained for resume")
+        status("interrupted; incomplete downloads and shards retained for resume")
         raise SystemExit(130) from None
+
+
+def _recorded_model_revision(paths: BundlePaths) -> str | None:
+    try:
+        manifest = load_manifest(paths, require_complete=False)
+    except Exception:
+        return None
+    model = manifest.get("model")
+    if not isinstance(model, dict):
+        return None
+    revision = model.get("resolved_revision")
+    return revision if isinstance(revision, str) else None
 
 
 def _main(argv: list[str] | None = None) -> None:
@@ -119,6 +132,7 @@ def _main(argv: list[str] | None = None) -> None:
     else:
         paths = BundlePaths.resolve()
 
+    recorded_model_revision = _recorded_model_revision(paths)
     manifest = prepare_bundle(
         paths,
         dataset_revision=args.dataset_revision,
@@ -131,15 +145,34 @@ def _main(argv: list[str] | None = None) -> None:
         disable_xet=args.disable_xet,
         token=os.environ.get("HF_TOKEN"),
     )
+    saved: dict[str, object] = {}
     if args.backend == "qdrant":
-        saved = manifest.get("qdrant")
-        saved = saved if isinstance(saved, dict) else {}
+        manifest_qdrant = manifest.get("qdrant")
+        saved = manifest_qdrant if isinstance(manifest_qdrant, dict) else {}
         saved_float16 = bool(saved.get("float16", False))
         if saved and saved_float16 != args.float16:
             parser.error(
                 "--float16 does not match saved Qdrant configuration; clean up "
                 "existing Qdrant storage and remove the qdrant manifest section first"
             )
+
+    resolved_model_revision = str(manifest["model"]["resolved_revision"])
+    if (
+        recorded_model_revision != resolved_model_revision
+        or not model_is_downloaded(paths)
+    ):
+        download_model(
+            paths,
+            revision=resolved_model_revision,
+            max_workers=args.max_workers,
+            progress_interval=args.progress_interval,
+            download_timeout=args.download_timeout,
+            token=os.environ.get("HF_TOKEN"),
+        )
+    else:
+        status("BGE-M3 model already downloaded; skipping model transfer")
+
+    if args.backend == "qdrant":
         saved_url = (
             args.url
             or os.environ.get("QDRANT_URL")
@@ -286,14 +319,6 @@ def _main(argv: list[str] | None = None) -> None:
             max_workers=ingest_workers,
             worker_database_factory=worker_database_factory,
         )
-    download_model(
-        paths,
-        revision=str(manifest["model"]["resolved_revision"]),
-        max_workers=args.max_workers,
-        progress_interval=args.progress_interval,
-        download_timeout=args.download_timeout,
-        token=os.environ.get("HF_TOKEN"),
-    )
     manifest["status"] = "complete"
     atomic_json(paths.manifest_path, manifest)
     print(f"Ingested {count} records")
