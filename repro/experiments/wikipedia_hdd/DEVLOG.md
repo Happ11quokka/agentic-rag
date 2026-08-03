@@ -37,6 +37,10 @@
 | 10 | 08-03 | `describe_index`가 인덱스를 하나도 안 만든 상태에서도 `state=Finished`를 반환 | **해결** — `pending_index_rows == 0`으로 판정하도록 `wait_for_index` 구현 |
 | 11 | 08-03 | 200k건(800 MB)은 세그먼트 봉인 임계에 못 미쳐 brute-force로 검색됨 | **해결** — 600k로 늘려 `indexed_rows=66,000` 확인. 부분집합 규모를 1M으로 정한 근거 |
 | 12 | 08-03 | 단위 테스트가 `ensure_milvus`를 패치하지 않아 실제 스택을 pytest tmp 디렉터리로 재생성 | **해결** — 테스트 패치 + `ensure_milvus`가 실행 중 컨테이너의 마운트 경로를 검증하도록 수정 |
+| 13 | 08-03 | 적재 중 다운로드가 6 MB/s → 87 KB/s로 70배 하락 | **해결** — 원인 2개. 아래 [6절 실측](#실측--부분집합-적재-2026-08-03) 참조 |
+| 13a | 08-03 | Milvus `upsert`가 신규 컬렉션에서 레코드마다 delete tombstone 생성 → 압축이 HDD 포화 | **해결** — 신규 적재는 `insert`로 전환. `--milvus-upsert`로 종전 동작 선택 가능 |
+| 13b | 08-03 | 인덱스 빌드가 HDD 쓰기 대역(55–77 MB/s)을 독점 → 같은 디스크로 가는 다운로드가 굶음 | **해결** — 임시 parquet 스테이징을 내장 SSD로 분리. Milvus 저장소는 HDD 유지 |
+| 14 | 08-03 | `dataset`를 SSD로 심볼릭 링크하니 `ingest.py:125` 컨테인먼트 가드가 거부 | **정상 동작** — manifest 경로 탈출 방지 장치. 링크 대신 `--bundle-dir`(SSD) + `--milvus-storage-dir`(HDD) 분리로 해결 |
 
 **아직 열려 있는 것**: 5번(부분집합에서 지연 재측정 중), SSD 대조군 미구축, AgentBench 미연동. [7절](#7-남은-리스크) 참조.
 
@@ -218,13 +222,20 @@ Qdrant는 DISKANN을 지원하지 않는다. 이 브랜치에 이미 `wikipedia/
 Milvus standalone은 etcd + MinIO + milvus 세 컨테이너다. **볼륨 세 개를 모두 외장 HDD에 둔다.**
 
 ```
-/Volumes/agentic_rag/wikipedia_diskann/milvus/volumes/
-├── etcd/     메타데이터
-├── minio/    원본 binlog (오브젝트 스토리지)
-└── milvus/   ← DiskANN 인덱스 (/var/lib/milvus)
+HDD  /Volumes/agentic_rag/wikipedia_diskann/milvus/volumes/
+     ├── etcd/     메타데이터
+     ├── minio/    원본 binlog (오브젝트 스토리지)
+     └── milvus/   ← DiskANN 인덱스 (/var/lib/milvus)
+
+SSD  ~/.cache/wikipedia_diskann/
+     ├── dataset/  임시 parquet (적재 직후 삭제)
+     ├── models/   BGE-M3 (쿼리 인코딩용)
+     └── state/    적재 체크포인트
 ```
 
 검색 중 디스크를 읽는 지점은 `volumes/milvus` 하나뿐이다. MinIO는 적재와 로드 시점에만 쓰이고 쿼리 경로에는 관여하지 않는다. **저장매체 차이가 정확히 ANN 인덱스 읽기 하나에만 반영**되므로, 세그먼트 96개에 그래프 탐색·링크 읽기·벡터 읽기가 뒤섞여 있던 Qdrant 구성보다 인과 설명이 깨끗하다.
+
+**번들이 SSD에 있는 것은 처치를 약화시키지 않는다.** `dataset/`의 parquet은 적재 직후 삭제되는 임시 파일이고(manifest `retention: ephemeral`), 모델과 체크포인트는 검색 경로에 없다. 벡터DB 저장소 세 개는 전부 HDD에 있다. 이 분리를 하게 된 경위는 아래 실측에 있다.
 
 `queryNode.enableDisk`는 기본값이 `false`이며 이게 켜져 있지 않으면 DISKANN 인덱스를 로드할 수 없다. `QUERYNODE_ENABLEDISK=true` 환경변수로 켠다.
 
@@ -245,6 +256,35 @@ Milvus standalone은 etcd + MinIO + milvus 세 컨테이너다. **볼륨 세 개
 
 1. **`describe_index`의 `state`는 완료 신호로 못 쓴다.** 인덱스가 하나도 안 만들어진 상태(`indexed_rows=0, pending=200000`)에서도 `Finished`를 반환한다. 이걸 믿고 진행하면 brute-force 스캔을 인덱스 검색으로 착각해 측정한다. → `pending_index_rows == 0`으로 판정한다.
 2. **200k건(800 MB)으로는 세그먼트가 봉인되지 않는다.** Milvus는 sealed 세그먼트에만 인덱스를 만들므로, 데이터가 적으면 DiskANN이 아예 안 걸린다. 600k로 늘려서야 `indexed_rows > 0`이 됐다. → 부분집합 규모를 **10샤드(≈1M건)** 로 잡은 근거다.
+
+### 실측 — 부분집합 적재 (2026-08-03)
+
+첫 적재 시도에서 다운로드가 6 MB/s → **87 KB/s로 70배 떨어졌다.** 원인이 두 개였고, 둘 다 "HDD의 쓰기 대역이 유한하다"는 같은 뿌리에서 나왔다.
+
+**원인 1 — `upsert`가 만든 delete tombstone.** Milvus의 `upsert`는 delete + insert로 구현된다. 신규 컬렉션에 200k건을 넣었을 뿐인데 Milvus 로그에 `"delete entries counts"=111056`, `77099`가 찍혔다. **덮어쓸 것이 없는 적재에서 레코드마다 삭제 마커를 만들고 그걸 다시 압축**하고 있었다.
+
+```
+200k 레코드 적재 후 디스크    : 18 GB   (예상 ~1.2 GB)
+적재가 멈춘 상태에서의 증가율 : 680 MB/분   ← 순수 압축 부하
+```
+
+→ `insert`로 전환했다. 되돌릴 수 있게 `--milvus-upsert` 플래그를 남겼다(재개 시 중복 방지용).
+
+**원인 2 — 인덱스 빌드가 디스크를 독점.** tombstone을 없앤 뒤에도 다운로드가 270 KB/s에 머물렀다. 같은 시각 측정값:
+
+| 측정 | 값 | 해석 |
+|---|---|---|
+| `iostat -d disk6` | 55–77 MB/s, 84–110 tps, ~700 KB/t | HDD 순차 쓰기 한계(84 MB/s) 근처 — 포화 |
+| HF → 내장 SSD (curl 40 MB) | **5.3 MB/s** | 회선은 정상 |
+| HF → HDD (진행 중인 적재) | **270 KB/s** | 같은 회선, 20배 느림 |
+
+**회선이 아니라 디스크였다.** DiskANN 인덱스 빌드가 HDD 쓰기 대역을 다 쓰는 동안, 같은 디스크로 떨어지는 parquet 쓰기가 큐 뒤에서 굶었다.
+
+→ 임시 parquet 스테이징을 내장 SSD로 분리했다(`--bundle-dir` SSD + `--milvus-storage-dir` HDD). 다운로드가 8.7 MB/s로 회복됐다.
+
+처음엔 `dataset/`를 SSD로 심볼릭 링크했는데 `ingest.py:125`의 컨테인먼트 가드가 거부했다. manifest에 적힌 상대 경로가 번들 밖을 가리키지 못하게 하는 장치이므로 **가드가 옳고 링크가 틀렸다.** 디렉터리를 통째로 옮기는 방식으로 바꿨다.
+
+> **이것도 결과다.** "HDD에 벡터DB를 올린다"는 처치는 검색만 느리게 만드는 게 아니라 **적재 파이프라인 전체의 동시성을 제약한다.** SSD 대조군에서는 이 제약이 없으므로, 적재 시간을 비교 지표로 쓸 때 주의해야 한다.
 
 ### 부분집합으로 먼저 가는 이유
 
