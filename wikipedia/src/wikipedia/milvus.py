@@ -32,6 +32,10 @@ class MilvusConfig:
     # has nothing to overwrite; enable upsert only when resuming into rows that
     # may already exist.
     upsert_existing: bool = False
+    # Milvus caps VARCHAR at 65535 bytes and has no larger string type, so a
+    # longer chunk cannot be stored intact. Truncation is opt-in and counted
+    # rather than silent, because it alters the payload the retriever returns.
+    truncate_text: bool = False
     consistency_level: str = "Bounded"
     dimension: int = 1024
     metric_type: str = "IP"
@@ -67,6 +71,7 @@ class MilvusVectorDB(VectorDB):
     ) -> None:
         self.config = config
         self.dimension = config.dimension
+        self.truncated_records = 0
         self._loaded = False
         if client is None:
             from pymilvus import MilvusClient
@@ -196,14 +201,22 @@ class MilvusVectorDB(VectorDB):
             timeout=self.config.timeout,
         )
 
-    @staticmethod
-    def _check_bytes(value: str, maximum: int, field_name: str, source_id: str) -> None:
-        size = len(value.encode("utf-8"))
-        if size > maximum:
+    def _check_bytes(
+        self, value: str, maximum: int, field_name: str, source_id: str
+    ) -> str:
+        encoded = value.encode("utf-8")
+        if len(encoded) <= maximum:
+            return value
+        if not (self.config.truncate_text and field_name == "text"):
             raise ValueError(
                 f"Milvus {field_name} exceeds {maximum} bytes for source_id={source_id!r} "
-                f"({size} bytes); content was not truncated"
+                f"({len(encoded)} bytes); content was not truncated. Milvus caps VARCHAR "
+                f"at 65535 bytes and has no larger string type — pass --milvus-truncate-text "
+                f"to store these records with the payload cut to the limit"
             )
+        self.truncated_records += 1
+        # Cut on a UTF-8 boundary: slicing bytes can split a multi-byte character.
+        return encoded[:maximum].decode("utf-8", errors="ignore")
 
     def upsert(self, records: Sequence[WikipediaRecord]) -> int:
         if not records:
@@ -213,13 +226,15 @@ class MilvusVectorDB(VectorDB):
             self._check_bytes(record.source_id, self.config.id_max_bytes, "id", record.source_id)
             self._check_bytes(record.url, self.config.url_max_bytes, "url", record.source_id)
             self._check_bytes(record.title, self.config.title_max_bytes, "title", record.source_id)
-            self._check_bytes(record.text, self.config.text_max_bytes, "text", record.source_id)
+            text = self._check_bytes(
+                record.text, self.config.text_max_bytes, "text", record.source_id
+            )
             rows.append(
                 {
                     "id": record.source_id,
                     "url": record.url,
                     "title": record.title,
-                    "text": record.text,
+                    "text": text,
                     "embedding": list(record.embedding),
                 }
             )

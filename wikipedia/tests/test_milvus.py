@@ -62,6 +62,43 @@ def test_upsert_existing_opts_into_idempotent_writes() -> None:
     assert client.inserted == []
 
 
+def test_oversized_text_fails_loudly_by_default() -> None:
+    database = MilvusVectorDB(MilvusConfig(), client=FakeClient())
+    record = _record()
+    huge = WikipediaRecord(
+        source_id=record.source_id,
+        url=record.url,
+        title=record.title,
+        text="a" * 70_000,
+        embedding=record.embedding,
+    )
+
+    with pytest.raises(ValueError, match="--milvus-truncate-text"):
+        database.upsert([huge])
+
+
+def test_truncate_text_cuts_on_a_utf8_boundary_and_counts() -> None:
+    client = FakeClient()
+    config = MilvusConfig(truncate_text=True, text_max_bytes=10)
+    database = MilvusVectorDB(config, client=client)
+    record = _record()
+    # 4 three-byte characters = 12 bytes; a naive 10-byte slice splits the fourth.
+    multibyte = WikipediaRecord(
+        source_id=record.source_id,
+        url=record.url,
+        title=record.title,
+        text="가나다라",
+        embedding=record.embedding,
+    )
+
+    database.upsert([multibyte])
+
+    stored = client.inserted[0][0]["text"]
+    assert stored == "가나다"
+    assert len(stored.encode("utf-8")) <= 10
+    assert database.truncated_records == 1
+
+
 def test_wait_for_index_ignores_finished_state_while_rows_are_pending() -> None:
     client = FakeClient(
         describe=[

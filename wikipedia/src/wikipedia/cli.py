@@ -126,6 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local Milvus stack storage (default: <bundle-dir>/milvus)",
     )
     parser.add_argument(
+        "--milvus-truncate-text",
+        action="store_true",
+        help=(
+            "store chunks longer than Milvus' 65535-byte VARCHAR limit with the text "
+            "cut to fit instead of failing; the embedding is unaffected and the number "
+            "of truncated records is reported"
+        ),
+    )
+    parser.add_argument(
         "--milvus-upsert",
         action="store_true",
         help=(
@@ -165,6 +174,13 @@ def _finalize_milvus_index(database: MilvusVectorDB) -> None:
     by brute-force scan instead of the on-disk index — which would silently
     invalidate any latency measured afterwards.
     """
+    truncated = getattr(database, "truncated_records", 0)
+    if truncated:
+        status(
+            f"truncated {truncated:,} chunks to Milvus' {database.config.text_max_bytes}-byte "
+            "text limit; embeddings are unaffected but the stored payload is shorter "
+            "than in the Qdrant collection"
+        )
     status("flushing Milvus segments so the index can cover every row")
     database.flush()
 
@@ -389,6 +405,7 @@ def _main(argv: list[str] | None = None) -> None:
             index_type=index_type,
             search_params={"search_list": search_list},
             upsert_existing=args.milvus_upsert,
+            truncate_text=args.milvus_truncate_text,
             timeout=timeout,
         )
         database = MilvusVectorDB(config)
