@@ -99,7 +99,7 @@ def test_truncate_text_cuts_on_a_utf8_boundary_and_counts() -> None:
     assert database.truncated_records == 1
 
 
-def test_wait_for_index_ignores_finished_state_while_rows_are_pending() -> None:
+def test_wait_for_index_ignores_finished_state_while_rows_are_unindexed() -> None:
     client = FakeClient(
         describe=[
             {
@@ -123,7 +123,63 @@ def test_wait_for_index_ignores_finished_state_while_rows_are_pending() -> None:
     final = database.wait_for_index(poll=0.0)
 
     assert final["indexed_rows"] == 200_000
-    assert client.describe_calls == 2
+    # Two polls to see the build finish, one more to confirm it held.
+    assert client.describe_calls == 3
+
+
+def test_wait_for_index_returns_when_pending_never_drops_to_zero() -> None:
+    """Milvus 2.5.27 reports pending_index_rows == total_rows after completion."""
+    client = FakeClient(
+        describe=[
+            {
+                "index_type": "DISKANN",
+                "state": "Finished",
+                "total_rows": 1_000_000,
+                "indexed_rows": 1_000_000,
+                "pending_index_rows": 1_000_000,
+            }
+        ]
+    )
+    database = MilvusVectorDB(MilvusConfig(), client=client)
+
+    final = database.wait_for_index(poll=0.0)
+
+    assert final["indexed_rows"] == 1_000_000
+
+
+def test_wait_for_index_requires_two_consecutive_confirmations() -> None:
+    """Compaction re-queues merged segments, so a single reading can mislead."""
+    client = FakeClient(
+        describe=[
+            {
+                "index_type": "DISKANN",
+                "state": "Finished",
+                "total_rows": 100,
+                "indexed_rows": 100,
+                "pending_index_rows": 0,
+            },
+            {
+                "index_type": "DISKANN",
+                "state": "Finished",
+                "total_rows": 200,
+                "indexed_rows": 100,
+                "pending_index_rows": 100,
+            },
+            {
+                "index_type": "DISKANN",
+                "state": "Finished",
+                "total_rows": 200,
+                "indexed_rows": 200,
+                "pending_index_rows": 0,
+            },
+        ]
+    )
+    database = MilvusVectorDB(MilvusConfig(), client=client)
+
+    final = database.wait_for_index(poll=0.0)
+
+    assert final["total_rows"] == 200
+    assert final["indexed_rows"] == 200
 
 
 def test_wait_for_index_raises_on_failed_build() -> None:

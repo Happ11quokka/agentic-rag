@@ -280,25 +280,35 @@ class MilvusVectorDB(VectorDB):
     ) -> dict[str, Any]:
         """Block until every row is covered by the index.
 
-        ``state`` is not a usable completion signal: Milvus reports ``Finished``
-        even when ``indexed_rows`` is 0 and every row is still pending, so a
-        caller that trusts it proceeds to benchmark brute-force scans. Completion
-        is therefore keyed on ``pending_rows`` reaching 0.
+        Neither ``state`` nor ``pending_rows`` is usable on its own. Measured on
+        Milvus 2.5.27: before any segment is built it reports ``state=Finished``
+        with ``indexed_rows=0``, so trusting the state benchmarks brute-force
+        scans; once every row is built it reports ``pending_index_rows`` equal to
+        the total, so waiting for pending to reach 0 never returns. Only
+        ``indexed_rows`` moves monotonically with real progress, so completion is
+        keyed on it reaching ``total_rows`` — confirmed on two consecutive polls,
+        because compaction re-queues merged segments and can briefly perturb the
+        counts.
         """
         limit = self.config.index_timeout if timeout is None else timeout
         deadline = time.monotonic() + limit
         state = self.index_state()
+        confirmations = 0
         while True:
             if on_progress is not None:
                 on_progress(state)
             if state["state"] == "Failed":
                 raise RuntimeError(f"Milvus index build failed: {state['reason']}")
-            if state["total_rows"] > 0 and state["pending_rows"] == 0:
-                return state
+            if state["total_rows"] > 0 and state["indexed_rows"] >= state["total_rows"]:
+                confirmations += 1
+                if confirmations >= 2:
+                    return state
+            else:
+                confirmations = 0
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"Milvus index still building after {limit:.0f} s: "
-                    f"indexed={state['indexed_rows']}, pending={state['pending_rows']}"
+                    f"indexed={state['indexed_rows']} of {state['total_rows']}"
                 )
             time.sleep(poll)
             state = self.index_state()
