@@ -382,7 +382,7 @@ def test_vectordb_collection_modes_are_controlled() -> None:
     assert [call["on_disk_payload"] for call in calls] == [False, True]
 
 
-def test_vectordb_sample_is_copied_identically() -> None:
+def test_vectordb_points_are_copied_identically() -> None:
     upserts: list[tuple[str, list[object]]] = []
     records = [
         SimpleNamespace(id=1, vector=[0.1, 0.2], payload={"text": "one"}),
@@ -397,7 +397,7 @@ def test_vectordb_sample_is_copied_identically() -> None:
             assert wait is True
             upserts.append((collection_name, points))
 
-    vectordb.copy_sample(
+    vectordb.copy_points(
         Client(),
         "source",
         vectordb.TemporaryCollections("memory", "disk"),
@@ -407,6 +407,86 @@ def test_vectordb_sample_is_copied_identically() -> None:
     assert [name for name, _ in upserts] == ["memory", "disk"]
     assert [point.id for point in upserts[0][1]] == [1, 2]
     assert upserts[0][1] == upserts[1][1]
+
+
+def test_vectordb_run_uses_every_available_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    point_count = 123_456
+    copied: list[int] = []
+    optimized: list[int] = []
+    reported: list[int] = []
+    config = SimpleNamespace(
+        url=vectordb.DEFAULT_QDRANT_URL,
+        float16=True,
+        dimension=2,
+        distance="DOT",
+        collection_name="source",
+    )
+    environment = SimpleNamespace(
+        database=SimpleNamespace(config=config, client=object()),
+        points_count=point_count,
+        paths=SimpleNamespace(model_dir="model", bundle_dir="bundle"),
+    )
+
+    @contextmanager
+    def prepare_wikipedia(**kwargs):
+        assert kwargs == {"require_idle": True}
+        yield environment
+
+    class Encoder:
+        def __init__(self, bundle_dir, *, require_complete):
+            assert bundle_dir == "bundle"
+            assert require_complete is False
+
+        def encode(self, question):
+            assert question == "question"
+            return [0.1, 0.2]
+
+    class Database:
+        def __init__(self, received_config):
+            assert received_config is config
+            self.client = object()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(
+        vectordb,
+        "select_benchmark_questions",
+        lambda count: [SimpleNamespace(question="question")],
+    )
+    monkeypatch.setattr(vectordb, "prepare_wikipedia", prepare_wikipedia)
+    monkeypatch.setattr(vectordb, "Encoder", Encoder)
+    monkeypatch.setattr(vectordb, "QdrantVectorDB", Database)
+    monkeypatch.setattr(vectordb, "create_collections", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        vectordb,
+        "copy_points",
+        lambda client, source, names, count: copied.append(count),
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "wait_until_optimized",
+        lambda client, collection, count: optimized.append(count),
+    )
+    monkeypatch.setattr(vectordb, "measure_rounds", lambda *args, **kwargs: [1.0])
+    monkeypatch.setattr(vectordb, "query_latency_ms", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(
+        vectordb,
+        "render_report",
+        lambda latencies, count: reported.append(count),
+    )
+    monkeypatch.setattr(vectordb, "delete_collections", lambda *args: None)
+
+    vectordb.run(query_count=1, repetitions=1)
+
+    assert copied == [point_count]
+    assert optimized == [point_count, point_count]
+    assert reported == [point_count]
 
 
 def test_query_latency_checks_results() -> None:

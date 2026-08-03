@@ -353,8 +353,9 @@ runtime, prints progress, and writes its final metric table to stdout only.
   between queries, zero/one-query regressions, incomplete-run diagnostics, and
   failure statuses. Each request has a 180-second timeout; each multi-turn question
   has a separate 600-second timeout.
-- `vectordb` runs no LLM. It compares identical temporary Qdrant samples in RAM,
-  warmed page cache, and best-effort cold-start on-disk storage, then deletes them.
+- `vectordb` runs no LLM. It copies every currently ingested point into identical
+  temporary Qdrant collections in RAM and on disk, compares RAM, warmed page cache,
+  and best-effort cold-start storage, then deletes the temporary collections.
 
 Tool-use and vector experiments accept a paused, partially ingested Wikipedia
 collection with a warning and the current point count. They refuse to measure while

@@ -30,7 +30,6 @@ from .common import (
 DESCRIPTION = "Measure controlled Qdrant cache, memory, and SSD retrieval latency"
 DEFAULT_QUERIES = 20
 DEFAULT_REPETITIONS = 10
-SAMPLE_POINTS = 100_000
 COPY_BATCH_SIZE = 256
 TOP_K = 5
 INDEXING_THRESHOLD = 10_000
@@ -80,7 +79,7 @@ def create_collections(
             raise ExperimentError(f"Qdrant did not create temporary collection {name}")
 
 
-def copy_sample(
+def copy_points(
     client: Any,
     source: str,
     names: TemporaryCollections,
@@ -251,9 +250,9 @@ def measure_rounds(
     return latencies
 
 
-def render_report(latencies: dict[str, list[float]], sample_points: int) -> None:
+def render_report(latencies: dict[str, list[float]], point_count: int) -> None:
     print(
-        f"\nVector DB metrics (query_points only; sample_points={sample_points:,}, top_k={TOP_K})"
+        f"\nVector DB metrics (query_points only; points={point_count:,}, top_k={TOP_K})"
     )
     rows: list[list[object]] = []
     for tier in ("cache", "memory", "ssd-best-effort"):
@@ -288,17 +287,10 @@ def run(query_count: int, repetitions: int) -> None:
                 "vectordb experiment requires local Docker Qdrant so it can control "
                 f"cold starts; configured endpoint is {url}"
             )
-        sample_points = min(SAMPLE_POINTS, environment.points_count)
-        if sample_points < TOP_K:
+        point_count = environment.points_count
+        if point_count < TOP_K:
             raise ExperimentError(
-                f"Qdrant has {sample_points} points; at least {TOP_K} are required"
-            )
-        if sample_points < SAMPLE_POINTS:
-            print(
-                f"warning: controlled sample reduced from {SAMPLE_POINTS:,} to "
-                f"{sample_points:,} available points",
-                file=sys.stderr,
-                flush=True,
+                f"Qdrant has {point_count} points; at least {TOP_K} are required"
             )
         print(f"setup: loading BGE-M3 from {environment.paths.model_dir}", flush=True)
         try:
@@ -319,16 +311,14 @@ def run(query_count: int, repetitions: int) -> None:
                 dimension=environment.database.config.dimension,
                 distance=environment.database.config.distance,
             )
-            copy_sample(
+            copy_points(
                 environment.database.client,
                 environment.database.config.collection_name,
                 names,
-                sample_points,
+                point_count,
             )
-            wait_until_optimized(
-                environment.database.client, names.memory, sample_points
-            )
-            wait_until_optimized(environment.database.client, names.disk, sample_points)
+            wait_until_optimized(environment.database.client, names.memory, point_count)
+            wait_until_optimized(environment.database.client, names.disk, point_count)
 
             latencies = {
                 "ssd-best-effort": measure_rounds(
@@ -358,7 +348,7 @@ def run(query_count: int, repetitions: int) -> None:
                 repetitions,
                 label="memory",
             )
-            render_report(latencies, sample_points)
+            render_report(latencies, point_count)
         finally:
             delete_collections(environment, names)
 
