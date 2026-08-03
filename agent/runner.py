@@ -3,11 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import statistics
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -19,17 +17,45 @@ from .retrieval import TimedRetriever, render_search_results
 SYSTEM_PROMPT = """Use thinking mode. /think
 
 Answer FanOutQA questions using semantic search over English Wikipedia.
-Decompose fan-out questions and collect every requested item.
+These questions require evidence from multiple Wikipedia articles.
 
-After reasoning, emit exactly one action:
-<search>one standalone semantic query</search>
-or
-<final>answer only, preserving requested list or mapping</final>
+Maintain an internal coverage checklist. First identify the requested entity set
+or ranking, then create one atomic fact to verify for every entity. Tool results
+prove only facts they explicitly state; never fill missing facts from memory.
 
-Never emit both. Search results contain ranked Wikipedia passage snippets.
+After each result, call search for the next unverified checklist item. Each search
+must target exactly one entity and one missing attribute; never combine multiple
+people or items in one query. Give a final answer only after every requested item
+and attribute has explicit tool-result evidence. A top-five question normally
+needs one list search plus five entity searches. Do not repeat equivalent searches.
+
+When complete, answer only, preserving the requested list or mapping.
 Reference date for the question is 2023-11-20."""
 
-ACTION_RE = re.compile(r"<(search|final)>(.*?)</\1>", re.DOTALL)
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search",
+        "description": (
+            "Search English Wikipedia passages for one atomic fact. "
+            "Call once per missing checklist item."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "One standalone semantic query about exactly one "
+                        "checklist item."
+                    ),
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
 METRIC_ALIASES = {
     "prompt_tokens": (
         "llamacpp:prompt_tokens_total",
@@ -50,15 +76,7 @@ METRIC_ALIASES = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class Action:
-    kind: str
-    text: str
-    raw: str
-    protocol_warning: str | None = None
-
-
-def initial_messages(question: Question | str) -> list[dict[str, str]]:
+def initial_messages(question: Question | str) -> list[dict[str, Any]]:
     text = question.question if isinstance(question, Question) else question
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -66,29 +84,11 @@ def initial_messages(question: Question | str) -> list[dict[str, str]]:
     ]
 
 
-def prompt_hash(messages: list[dict[str, str]]) -> str:
+def prompt_hash(messages: list[dict[str, Any]]) -> str:
     encoded = json.dumps(
         messages, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def parse_action(content: str) -> Action:
-    match = ACTION_RE.search(content)
-    if match is not None:
-        kind, text = match.groups()
-        raw = match.group(0)
-        warning = None
-        if len(ACTION_RE.findall(content)) > 1:
-            warning = "multiple_actions; used first complete action"
-        return Action(kind, text.strip(), raw, warning)
-    fallback = content.strip()
-    return Action(
-        "final",
-        fallback,
-        fallback,
-        "malformed_action; treated remaining content as final",
-    )
 
 
 def parse_prometheus(text: str) -> dict[str, float]:
@@ -133,6 +133,10 @@ def summarize_llm_call(call: dict[str, Any]) -> dict[str, Any]:
     intervals_ms = [item["inter_arrival_ns"] / 1_000_000 for item in chunks[1:]]
     reasoning = [item for item in chunks if item["channel"] == "reasoning"]
     content = [item for item in chunks if item["channel"] == "content"]
+    tool_call = [item for item in chunks if item["channel"] == "tool_call"]
+    action = [
+        item for item in chunks if item["channel"] in {"content", "tool_call"}
+    ]
     metrics = call.get("metrics_delta", {})
     prompt_ms = metrics.get("prompt_seconds", 0.0) * 1000
     decode_ms = metrics.get("decode_seconds", 0.0) * 1000
@@ -143,7 +147,9 @@ def summarize_llm_call(call: dict[str, Any]) -> dict[str, Any]:
         "ttft_ms": None if first is None else (first - start) / 1_000_000,
         "request_wall_ms": wall_ms,
         "reasoning_duration_ms": _channel_duration_ms(reasoning),
-        "content_action_duration_ms": _channel_duration_ms(content),
+        "content_action_duration_ms": _channel_duration_ms(action),
+        "content_duration_ms": _channel_duration_ms(content),
+        "tool_call_duration_ms": _channel_duration_ms(tool_call),
         "chunk_inter_arrival_p50_ms": (
             statistics.median(intervals_ms) if intervals_ms else None
         ),
@@ -201,7 +207,7 @@ class LlamaCppClient:
 
     def stream_completion(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         generation: dict[str, Any],
     ) -> dict[str, Any]:
         before = self.metrics()
@@ -209,11 +215,17 @@ class LlamaCppClient:
         chunks: list[dict[str, Any]] = []
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
         action_ready_ns: int | None = None
         extensions: dict[str, Any] = {}
         usage: dict[str, Any] = {}
         previous_ns = request_start
-        payload = {"messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+        payload = {
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         payload.update(generation)
 
         with self.client.stream(
@@ -236,7 +248,8 @@ class LlamaCppClient:
                 choices = event.get("choices") or []
                 if not choices:
                     continue
-                delta = choices[0].get("delta") or {}
+                choice = choices[0]
+                delta = choice.get("delta") or {}
                 for channel, key in (
                     ("reasoning", "reasoning_content"),
                     ("content", "content"),
@@ -259,15 +272,58 @@ class LlamaCppClient:
                         reasoning_parts.append(text)
                     else:
                         content_parts.append(text)
-                        if action_ready_ns is None and ACTION_RE.search("".join(content_parts)):
-                            action_ready_ns = received
+                for fragment in delta.get("tool_calls") or []:
+                    index = fragment.get("index")
+                    if not isinstance(index, int) or index < 0:
+                        continue
+                    selected = tool_call_parts.setdefault(
+                        index,
+                        {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    identifier = fragment.get("id")
+                    if isinstance(identifier, str):
+                        selected["id"] += identifier
+                    call_type = fragment.get("type")
+                    if isinstance(call_type, str):
+                        selected["type"] = call_type
+                    function = fragment.get("function") or {}
+                    streamed_text = ""
+                    name = function.get("name")
+                    if isinstance(name, str):
+                        selected["function"]["name"] += name
+                        streamed_text += name
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        selected["function"]["arguments"] += arguments
+                        streamed_text += arguments
+                    if streamed_text:
+                        received = self.clock_ns()
+                        chunks.append(
+                            {
+                                "sequence": len(chunks),
+                                "channel": "tool_call",
+                                "text": streamed_text,
+                                "received_ns": received,
+                                "inter_arrival_ns": received - previous_ns,
+                            }
+                        )
+                        previous_ns = received
+                value = choice.get("finish_reason")
+                if isinstance(value, str):
+                    finish_reason = value
+                    if action_ready_ns is None:
+                        action_ready_ns = self.clock_ns()
         request_end = self.clock_ns()
-        if action_ready_ns is None and content_parts:
-            # A malformed nonempty response becomes a fallback final action at EOF.
+        if action_ready_ns is None and (content_parts or tool_call_parts):
             action_ready_ns = request_end
         after = self.metrics()
         reasoning = "".join(reasoning_parts)
         content = "".join(content_parts)
+        tool_calls = [tool_call_parts[index] for index in sorted(tool_call_parts)]
         call = {
             "request_start_ns": request_start,
             "request_end_ns": request_end,
@@ -285,6 +341,8 @@ class LlamaCppClient:
             "chunks": chunks,
             "reasoning": reasoning,
             "content": content,
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
             "usage": usage,
             "response_extensions": extensions,
             "metrics_delta": metric_deltas(before, after),
@@ -312,7 +370,12 @@ class AgentRunner:
     ) -> None:
         self.llm = llm
         self.retriever = retriever
-        self.generation = dict(generation)
+        self.generation = {
+            **generation,
+            "tools": [SEARCH_TOOL],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        }
         self.max_searches = max_searches
         self.question_timeout_seconds = question_timeout_seconds
         self.clock_ns = clock_ns
@@ -325,7 +388,6 @@ class AgentRunner:
         final_response = ""
         terminal_status = "server_error"
         error: str | None = None
-        warnings: list[str] = []
 
         while True:
             if (
@@ -348,24 +410,43 @@ class AgentRunner:
                 error = detail
                 break
             llm_calls.append(call)
-            action = parse_action(call["content"])
-            if action.protocol_warning:
-                warnings.append(action.protocol_warning)
-            messages.append({"role": "assistant", "content": action.raw})
-            if action.kind == "final":
-                final_response = action.text
+            tool_calls = call.get("tool_calls") or []
+            if not tool_calls:
+                final_response = call["content"].strip()
+                if not final_response:
+                    terminal_status = "protocol_error"
+                    error = "model returned neither a search tool call nor a final answer"
+                    break
                 terminal_status = "final"
+                break
+            try:
+                tool_call_id, query = _parse_search_tool_call(call)
+            except ValueError as exc:
+                terminal_status, error = "protocol_error", str(exc)
                 break
             if len(retrieval_calls) >= self.max_searches:
                 terminal_status = "search_limit"
                 break
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": call["content"],
+                    "tool_calls": tool_calls,
+                }
+            )
             try:
-                retrieval = self.retriever.search(action.text)
+                retrieval = self.retriever.search(query)
             except Exception as exc:
                 terminal_status, error = "retrieval_error", str(exc)
                 break
             retrieval_calls.append(retrieval)
-            messages.append({"role": "user", "content": render_search_results(retrieval)})
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": render_search_results(retrieval),
+                }
+            )
             if len(retrieval_calls) >= self.max_searches:
                 terminal_status = "search_limit"
                 break
@@ -375,12 +456,40 @@ class AgentRunner:
             "terminal_status": terminal_status,
             "final_response": final_response,
             "error": error,
-            "protocol_warning": "; ".join(warnings) if warnings else None,
+            "protocol_warning": None,
             "search_count": len(retrieval_calls),
             "llm_calls": llm_calls,
             "retrieval_calls": retrieval_calls,
             "timing": summarize_question(started, ended, llm_calls, retrieval_calls),
         }
+
+
+def _parse_search_tool_call(call: dict[str, Any]) -> tuple[str, str]:
+    tool_calls = call.get("tool_calls") or []
+    if len(tool_calls) != 1:
+        raise ValueError(f"expected exactly one search tool call; got {len(tool_calls)}")
+    if call.get("content", "").strip():
+        raise ValueError("model mixed final content with a search tool call")
+    tool_call = tool_calls[0]
+    identifier = tool_call.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError("search tool call has no id")
+    function = tool_call.get("function") or {}
+    if function.get("name") != "search":
+        raise ValueError(f"unsupported tool call: {function.get('name')!r}")
+    arguments = function.get("arguments")
+    if not isinstance(arguments, str):
+        raise ValueError("search tool arguments are not JSON text")
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"search tool arguments are malformed: {exc}") from exc
+    if not isinstance(parsed, dict) or set(parsed) != {"query"}:
+        raise ValueError("search tool arguments must contain only query")
+    query = parsed["query"]
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("search tool query must be a nonempty string")
+    return identifier, query.strip()
 
 
 def summarize_question(

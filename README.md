@@ -328,15 +328,38 @@ explicit instead of adding cold-start work to the first text query. Ingestion an
 vector-only search never load the encoder. Dataset embeddings are inserted unchanged.
 No filters, reranking, sparse, or hybrid search are included.
 
-## 11. FanOutQA local Qwen experiment
+## 11. Local experiments
 
 ```bash
 # Download and verify pinned main and draft GGUF files.
 uv run download-models
 
-# Select an experiment interactively, then run it.
+# Select parallel, independent-run, tooluse, or vectordb and enter run counts.
 uv run run-experiment
 ```
 
-Arguments after `run-experiment` are forwarded to the selected experiment, for
-example `uv run run-experiment --limit 1`.
+`run-experiment` is intentionally interactive and accepts no arguments. Each
+orchestrator uses Python constants instead of TOML configuration, prepares its
+runtime, prints progress, and writes its final metric table to stdout only.
+
+- `parallel` starts Qwen3 14B and 4B servers together, sends paired identical
+  FanOutQA prompts, and reports TTFT plus per-model and combined decode throughput.
+- `independent-run` runs Qwen3 14B and 4B in isolated, non-overlapping server
+  phases with the same prompts and generation settings as `parallel`. It reports
+  per-model TTFT and decode throughput without a combined metric.
+- `tooluse` runs the models in separate phases against Qdrant using Qwen's native,
+  sequential `search` tool calls and a 512-token thinking budget per turn. It
+  reports generated tokens to the first query, query counts, generated tokens
+  between queries, zero/one-query regressions, incomplete-run diagnostics, and
+  failure statuses. Each request has a 180-second timeout; each multi-turn question
+  has a separate 600-second timeout.
+- `vectordb` runs no LLM. It compares identical temporary Qdrant samples in RAM,
+  warmed page cache, and best-effort cold-start on-disk storage, then deletes them.
+
+Tool-use and vector experiments accept a paused, partially ingested Wikipedia
+collection with a warning and the current point count. They refuse to measure while
+ingestion appears active. The `parallel` and `independent-run` experiments have no
+vector-database dependency.
+Missing GGUF files produce the `uv run download-models` instruction; missing bundle,
+BGE-M3, Docker, Qdrant, or llama.cpp prerequisites similarly produce specific setup
+guidance. Redirect stdout if a durable report is wanted.

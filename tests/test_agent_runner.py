@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import httpx
@@ -6,35 +7,57 @@ from agent.runner import (
     AgentRunner,
     LlamaCppClient,
     metric_deltas,
-    parse_action,
     summarize_llm_call,
 )
 from fanoutqa.dataset import Question
 
 
-def call(content: str, reasoning: str = "thinking") -> dict[str, Any]:
-    chunks = [
-        {
-            "sequence": 0,
-            "channel": "reasoning",
-            "text": reasoning,
-            "received_ns": 2_000_000,
-            "inter_arrival_ns": 1_000_000,
-        },
-        {
-            "sequence": 1,
-            "channel": "content",
-            "text": content,
-            "received_ns": 4_000_000,
-            "inter_arrival_ns": 2_000_000,
-        },
-    ]
+def call(
+    content: str,
+    reasoning: str = "thinking",
+    *,
+    tool_calls: list[dict[str, Any]] | None = None,
+    finish_reason: str = "stop",
+) -> dict[str, Any]:
+    chunks = []
+    if reasoning:
+        chunks.append(
+            {
+                "sequence": len(chunks),
+                "channel": "reasoning",
+                "text": reasoning,
+                "received_ns": 2_000_000,
+                "inter_arrival_ns": 1_000_000,
+            }
+        )
+    if content:
+        chunks.append(
+            {
+                "sequence": len(chunks),
+                "channel": "content",
+                "text": content,
+                "received_ns": 4_000_000,
+                "inter_arrival_ns": 2_000_000,
+            }
+        )
+    if tool_calls:
+        chunks.append(
+            {
+                "sequence": len(chunks),
+                "channel": "tool_call",
+                "text": tool_calls[0]["function"]["arguments"],
+                "received_ns": 4_000_000,
+                "inter_arrival_ns": 2_000_000,
+            }
+        )
     value = {
         "request_start_ns": 1_000_000,
         "request_end_ns": 5_000_000,
         "chunks": chunks,
         "reasoning": reasoning,
         "content": content,
+        "tool_calls": tool_calls or [],
+        "finish_reason": finish_reason,
         "usage": {"prompt_tokens": 2, "completion_tokens": 3},
         "metrics_delta": {
             "prompt_tokens": 2,
@@ -47,14 +70,35 @@ def call(content: str, reasoning: str = "thinking") -> dict[str, Any]:
     return value
 
 
-class LLM:
-    def __init__(self, responses: list[str]) -> None:
-        self.responses = iter(responses)
-        self.messages: list[list[dict[str, str]]] = []
+def search_call(query: str, identifier: str = "call_1") -> dict[str, Any]:
+    return call(
+        "",
+        tool_calls=[
+            {
+                "id": identifier,
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "arguments": json.dumps({"query": query}),
+                },
+            }
+        ],
+        finish_reason="tool_calls",
+    )
 
-    def stream_completion(self, messages: list[dict[str, str]], generation: dict[str, Any]):
+
+class LLM:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = iter(responses)
+        self.messages: list[list[dict[str, Any]]] = []
+        self.generations: list[dict[str, Any]] = []
+
+    def stream_completion(
+        self, messages: list[dict[str, Any]], generation: dict[str, Any]
+    ) -> dict[str, Any]:
         self.messages.append([dict(item) for item in messages])
-        return call(next(self.responses))
+        self.generations.append(generation)
+        return next(self.responses)
 
 
 class Retriever:
@@ -76,18 +120,8 @@ class Clock:
         return self.now
 
 
-def test_parser_handles_search_final_split_content_and_malformed_fallback() -> None:
-    assert parse_action("prefix <search>alpha</search> suffix").kind == "search"
-    assert parse_action("<final>answer</final>").text == "answer"
-    # Llama client concatenates content chunks before parsing, so split tags remain valid.
-    assert parse_action("<sea" + "rch>alpha</sea" + "rch>").text == "alpha"
-    malformed = parse_action("untagged answer")
-    assert malformed.kind == "final"
-    assert malformed.protocol_warning is not None
-
-
 def test_reasoning_not_added_to_history_and_search_limit_terminates() -> None:
-    llm = LLM(["<search>one</search>", "<search>two</search>"])
+    llm = LLM([search_call("one"), search_call("two", "call_2")])
     runner = AgentRunner(
         llm,
         Retriever(),
@@ -101,14 +135,49 @@ def test_reasoning_not_added_to_history_and_search_limit_terminates() -> None:
 
     assert result["terminal_status"] == "search_limit"
     assert result["search_count"] == 2
-    assert all(item["content"] != "thinking" for item in llm.messages[1])
-    assert {item["content"] for item in llm.messages[1] if item["role"] == "assistant"} == {
-        "<search>one</search>"
-    }
+    assert llm.generations[0]["parallel_tool_calls"] is False
+    assert llm.generations[0]["tools"][0]["function"]["name"] == "search"
+    assistant = next(item for item in llm.messages[1] if item["role"] == "assistant")
+    tool = next(item for item in llm.messages[1] if item["role"] == "tool")
+    assert "reasoning_content" not in assistant
+    assert assistant["content"] == ""
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    assert tool["tool_call_id"] == "call_1"
+
+
+def test_invalid_or_multiple_tool_calls_are_protocol_errors() -> None:
+    invalid = search_call("one")
+    invalid["tool_calls"].append(search_call("two", "call_2")["tool_calls"][0])
+    runner = AgentRunner(
+        LLM([invalid]),
+        Retriever(),
+        generation={},
+        clock_ns=Clock(),
+    )
+
+    result = runner.run(Question("id", "question", ()))
+
+    assert result["terminal_status"] == "protocol_error"
+    assert result["search_count"] == 0
+    assert "exactly one" in result["error"]
+
+
+def test_plain_content_is_final_answer() -> None:
+    runner = AgentRunner(
+        LLM([call("answer")]),
+        Retriever(),
+        generation={},
+        clock_ns=Clock(),
+    )
+
+    result = runner.run(Question("id", "question", ()))
+
+    assert result["terminal_status"] == "final"
+    assert result["final_response"] == "answer"
 
 
 def test_call_timing_and_metrics_delta() -> None:
-    timing = call("<final>x</final>")["timing"]
+    timing = call("x")["timing"]
     assert timing["ttft_ms"] == 1
     assert timing["request_wall_ms"] == 4
     assert timing["server_prompt_ms"] == 1
@@ -120,7 +189,7 @@ def test_call_timing_and_metrics_delta() -> None:
     ) == {"prompt_tokens": 4}
 
 
-def test_stream_keeps_reasoning_and_content_chunks_separate() -> None:
+def test_stream_reconstructs_native_tool_call_fragments() -> None:
     requests = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -134,8 +203,10 @@ def test_stream_keeps_reasoning_and_content_chunks_separate() -> None:
         body = "\n".join(
             [
                 'data: {"choices":[{"delta":{"reasoning_content":"why"}}]}',
-                'data: {"choices":[{"delta":{"content":"<sea"}}]}',
-                'data: {"choices":[{"delta":{"content":"rch>x</search>"}}]}',
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{"}}]}}]}',
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\\"query\\\":\\\"x\\\"}"}}]}}]}',
+                'data: {"choices":[{"finish_reason":"tool_calls","delta":{}}]}',
+                'data: {"choices":[],"usage":{"completion_tokens":7}}',
                 "data: [DONE]",
                 "",
             ]
@@ -148,13 +219,22 @@ def test_stream_keeps_reasoning_and_content_chunks_separate() -> None:
     result = llm.stream_completion([{"role": "user", "content": "q"}], {})
 
     assert result["reasoning"] == "why"
-    assert result["content"] == "<search>x</search>"
+    assert result["content"] == ""
+    assert result["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search", "arguments": '{"query":"x"}'},
+        }
+    ]
+    assert result["finish_reason"] == "tool_calls"
+    assert result["usage"]["completion_tokens"] == 7
     assert [item["channel"] for item in result["chunks"]] == [
         "reasoning",
-        "content",
-        "content",
+        "tool_call",
+        "tool_call",
     ]
-    assert result["action_ready_ns"] == result["chunks"][-1]["received_ns"]
+    assert result["action_ready_ns"] is not None
     assert [item["received_ns"] for item in result["chunks"]] == sorted(
         item["received_ns"] for item in result["chunks"]
     )

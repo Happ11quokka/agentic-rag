@@ -1,78 +1,83 @@
-from pathlib import Path
-
 import pytest
 
-from experiment.setup import cli
-
-
-def test_available_experiments_are_sorted(tmp_path: Path) -> None:
-    (tmp_path / "z.toml").write_text("", encoding="utf-8")
-    (tmp_path / "a.toml").write_text("", encoding="utf-8")
-    (tmp_path / "ignored.txt").write_text("", encoding="utf-8")
-
-    assert [path.name for path in cli.available_experiments(tmp_path)] == [
-        "a.toml",
-        "z.toml",
-    ]
+from experiment import cli, independent_run, parallel, tooluse, vectordb
+from experiment.common import ExperimentError, prompt_positive_int
 
 
 def test_choose_experiment_accepts_number_after_invalid_input(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    experiment = tmp_path / "parallel.toml"
-    experiment.write_text(
-        'schema_version = 1\ndescription = "Sequential phases"\n', encoding="utf-8"
-    )
     answers = iter(["wrong", "1"])
 
-    selected = cli.choose_experiment([experiment], input_fn=lambda _: next(answers))
+    selected = cli.choose_experiment(input_fn=lambda _: next(answers))
 
-    assert selected == experiment
+    assert selected.name == "parallel"
     output = capsys.readouterr().out
     assert "parallel" in output
     assert "Invalid experiment selection" in output
 
 
-def test_choose_experiment_accepts_name(tmp_path: Path) -> None:
-    experiment = tmp_path / "parallel.toml"
-    experiment.write_text("schema_version = 1\n", encoding="utf-8")
-
-    assert cli.choose_experiment(
-        [experiment], input_fn=lambda _: "parallel"
-    ) == experiment
-
-
-def test_run_experiment_forwards_selected_config_and_arguments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    experiment = tmp_path / "parallel.toml"
-    calls: list[list[str] | None] = []
-    monkeypatch.setattr(cli, "available_experiments", lambda: [experiment])
-    monkeypatch.setattr(cli, "choose_experiment", lambda _: experiment)
-    monkeypatch.setattr(cli.orchestrate, "main", lambda args=None: calls.append(args))
-    monkeypatch.setattr(cli.sys, "argv", ["run-experiment", "--limit", "1"])
-
-    cli.run_experiment()
-
-    assert calls == [["--config", str(experiment), "--limit", "1"]]
-
-
-def test_download_models_resolves_both_roles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[str] = []
-    monkeypatch.setattr(
-        cli.orchestrate,
-        "load_config",
-        lambda: {"models": {"main": {"file": "main"}, "draft": {"file": "draft"}}},
+def test_choose_experiment_accepts_name() -> None:
+    assert cli.choose_experiment(input_fn=lambda _: "vectordb").name == "vectordb"
+    assert (
+        cli.choose_experiment(input_fn=lambda _: "independent-run").name
+        == "independent-run"
     )
 
-    def resolve(role: str, model: object, models_dir: Path):
-        calls.append(role)
-        return tmp_path / f"{role}.gguf", {"duration_ms": 1.0}
 
-    monkeypatch.setattr(cli.orchestrate, "resolve_model", resolve)
+def test_run_experiment_dispatches_with_same_input_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    experiment = cli.Experiment(
+        "test", "test", lambda *, input_fn: calls.append(input_fn)
+    )
+    monkeypatch.setattr(cli, "choose_experiment", lambda **kwargs: experiment)
+    monkeypatch.setattr(cli.sys, "argv", ["run-experiment"])
 
-    cli.download_models()
+    def input_fn(_: str) -> str:
+        return ""
 
-    assert calls == ["main", "draft"]
+    cli.run_experiment(input_fn=input_fn)
+
+    assert calls == [input_fn]
+
+
+def test_run_experiment_rejects_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli.sys, "argv", ["run-experiment", "parallel"])
+    with pytest.raises(ExperimentError, match="accepts no arguments"):
+        cli.run_experiment()
+
+
+def test_prompt_positive_int_uses_default_and_retries(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    answers = iter(["bad", "-1", "3"])
+    assert prompt_positive_int("Count", 10, input_fn=lambda _: next(answers)) == 3
+    assert capsys.readouterr().out.count("positive integer") == 2
+    assert prompt_positive_int("Count", 10, input_fn=lambda _: "") == 10
+
+
+@pytest.mark.parametrize(
+    ("module", "defaults"),
+    [
+        (parallel, (parallel.DEFAULT_TASKS, parallel.DEFAULT_REPETITIONS)),
+        (
+            independent_run,
+            (independent_run.DEFAULT_TASKS, independent_run.DEFAULT_REPETITIONS),
+        ),
+        (tooluse, (tooluse.DEFAULT_TASKS, tooluse.DEFAULT_REPETITIONS)),
+        (vectordb, (vectordb.DEFAULT_QUERIES, vectordb.DEFAULT_REPETITIONS)),
+    ],
+)
+def test_experiment_prompts_forward_defaults(
+    module: object,
+    defaults: tuple[int, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        module, "run", lambda first, second: calls.append((first, second))
+    )
+    module.prompt_and_run(input_fn=lambda _: "")  # type: ignore[attr-defined]
+    assert calls == [defaults]

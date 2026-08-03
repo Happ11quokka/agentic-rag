@@ -9,8 +9,8 @@ dependencies = [
 ]
 
 [project.scripts]
-download-models = "experiment.setup.cli:download_models"
-run-experiment = "experiment.setup.cli:run_experiment"
+download-models = "experiment.models:main"
+run-experiment = "experiment.cli:main"
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -35,6 +35,3 @@ pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 include = ["agent*", "experiment*", "fanoutqa*"]
-
-[tool.setuptools.package-data]
-"experiment.setup" = ["*.toml", "*.sh"]

@@ -15,21 +15,15 @@ From repository root:
 ```bash
 uv run download-models
 uv run run-experiment
-
-# Direct non-interactive entrypoint:
-./experiment/setup/run.sh
-./experiment/setup/run.sh --limit 1
-./experiment/setup/run.sh --question-id 7dcbbbdc7f1120cd
-./experiment/setup/run.sh --role main
-./experiment/setup/run.sh --role draft
-./experiment/setup/run.sh --run-dir experiment/results/<existing-run> --resume
 ```
 
-The command reuses the Wikipedia bundle selected by `WIKIPEDIA_BUNDLE_DIR` or
-`.wikipedia.local.toml`, starts/reuses its Qdrant runtime, loads BGE-M3 once, and then runs
-main and draft model phases sequentially on one `llama-server` slot. Large dataset, model,
-and result artifacts are ignored by Git.
+The interactive launcher offers simultaneous main/draft inference, separate tool-use
+phases, and a Qdrant-only storage benchmark. It asks for task/query and repetition counts,
+then prints progress and final metrics to stdout. No experiment configuration or result
+files are written.
 
-Each run writes `manifest.json`, fsynced `traces.jsonl`, `timing_summary.json`, and one
-server log per selected role. SSE chunks are client-observed response chunks, not claimed
-GPU-token timestamps.
+Tool-use reuses the Wikipedia bundle selected by `WIKIPEDIA_BUNDLE_DIR` or
+`.wikipedia.local.toml`, starts/reuses Qdrant, loads BGE-M3 once, and runs main and draft
+model phases sequentially. The parallel experiment starts both model servers together and
+does not require Qdrant. SSE timing remains client-observed rather than a claimed GPU-token
+timestamp.
