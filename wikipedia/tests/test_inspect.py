@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from wikipedia import inspect, qdrant_runtime
+from wikipedia import docker_runtime, inspect, qdrant_runtime
 from wikipedia.bundle import BundlePaths
 from wikipedia.types import SearchResult
 
@@ -138,7 +138,9 @@ def test_main_prints_bundle_database_latency_and_chunks(
         "resolve",
         classmethod(lambda cls, bundle_dir=None: BundlePaths.from_dir(tmp_path)),
     )
-    monkeypatch.setattr(inspect, "inspect_bundle", lambda bundle_dir: _summary(tmp_path))
+    monkeypatch.setattr(
+        inspect, "inspect_bundle", lambda bundle_dir, **kwargs: _summary(tmp_path)
+    )
     monkeypatch.setattr(
         inspect, "ensure_qdrant", lambda url, **kwargs: "already running"
     )
@@ -174,7 +176,7 @@ def test_main_warns_and_queries_incomplete_bundle(
     monkeypatch.setattr(
         inspect,
         "inspect_bundle",
-        lambda bundle_dir: _summary(tmp_path, complete=False),
+        lambda bundle_dir, **kwargs: _summary(tmp_path, complete=False),
     )
     monkeypatch.setattr(
         inspect, "ensure_qdrant", lambda url, **kwargs: "already running"
@@ -208,7 +210,9 @@ def test_main_skips_query_when_incomplete_bundle_has_no_model(
     monkeypatch.setattr(
         inspect,
         "inspect_bundle",
-        lambda bundle_dir: _summary(tmp_path, complete=False, model_bytes=0),
+        lambda bundle_dir, **kwargs: _summary(
+            tmp_path, complete=False, model_bytes=0
+        ),
     )
     monkeypatch.setattr(
         inspect, "ensure_qdrant", lambda url, **kwargs: "already running"
@@ -284,7 +288,7 @@ def test_ensure_qdrant_rejects_non_posix_storage_before_starting_docker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     storage = tmp_path / "qdrant"
-    monkeypatch.setattr(qdrant_runtime, "_filesystem_type", lambda path: "exfat")
+    monkeypatch.setattr(docker_runtime, "filesystem_type", lambda path: "exfat")
     monkeypatch.setattr(
         qdrant_runtime,
         "_ensure_docker",
@@ -304,7 +308,7 @@ def test_filesystem_type_reads_macos_mount_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        qdrant_runtime.subprocess,
+        docker_runtime.subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=0,
@@ -312,7 +316,7 @@ def test_filesystem_type_reads_macos_mount_output(
         ),
     )
 
-    assert qdrant_runtime._filesystem_type(tmp_path / "qdrant") == "exfat"
+    assert docker_runtime.filesystem_type(tmp_path / "qdrant") == "exfat"
 
 
 def test_main_rejects_missing_collection(
@@ -323,7 +327,9 @@ def test_main_rejects_missing_collection(
         "resolve",
         classmethod(lambda cls, bundle_dir=None: BundlePaths.from_dir(tmp_path)),
     )
-    monkeypatch.setattr(inspect, "inspect_bundle", lambda bundle_dir: _summary(tmp_path))
+    monkeypatch.setattr(
+        inspect, "inspect_bundle", lambda bundle_dir, **kwargs: _summary(tmp_path)
+    )
     monkeypatch.setattr(
         inspect, "ensure_qdrant", lambda url, **kwargs: "already running"
     )

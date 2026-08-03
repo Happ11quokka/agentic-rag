@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from .base import VectorDB
 from .types import SearchResult, WikipediaRecord
+
+DEFAULT_INDEX_TYPE = "DISKANN"
+DEFAULT_SEARCH_LIST = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,12 +21,17 @@ class MilvusConfig:
     database: str = "default"
     collection_name: str = "wikipedia_2024_06_bge_m3_en_v1"
     timeout: float = 60.0
+    load_timeout: float = 1800.0
+    index_timeout: float = 14400.0
+    search_timeout: float = 3600.0
     consistency_level: str = "Bounded"
     dimension: int = 1024
     metric_type: str = "IP"
-    index_type: str = "AUTOINDEX"
+    index_type: str = DEFAULT_INDEX_TYPE
     index_params: Mapping[str, Any] = field(default_factory=dict)
-    search_params: Mapping[str, Any] = field(default_factory=dict)
+    search_params: Mapping[str, Any] = field(
+        default_factory=lambda: {"search_list": DEFAULT_SEARCH_LIST}
+    )
     id_max_bytes: int = 512
     url_max_bytes: int = 4096
     title_max_bytes: int = 4096
@@ -214,10 +223,64 @@ class MilvusVectorDB(VectorDB):
         acknowledged = response.get("upsert_count", response.get("insert_count", len(rows)))
         return int(acknowledged)
 
+    def flush(self) -> None:
+        """Seal growing segments.
+
+        Milvus only builds indexes for sealed segments, so ingestion that ends
+        without a flush leaves the newest data searchable by brute force alone —
+        the on-disk index never covers it.
+        """
+        self.client.flush(self.config.collection_name, timeout=self.config.index_timeout)
+
+    def index_state(self) -> dict[str, Any]:
+        detail = self.client.describe_index(
+            self.config.collection_name, "embedding", timeout=self.config.timeout
+        )
+        return {
+            "index_type": str(detail.get("index_type", "")).upper(),
+            "state": str(detail.get("state", "")),
+            "total_rows": int(detail.get("total_rows") or 0),
+            "indexed_rows": int(detail.get("indexed_rows") or 0),
+            "pending_rows": int(detail.get("pending_index_rows") or 0),
+            "reason": str(detail.get("index_state_fail_reason", "")),
+        }
+
+    def wait_for_index(
+        self,
+        *,
+        timeout: float | None = None,
+        poll: float = 15.0,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Block until every row is covered by the index.
+
+        ``state`` is not a usable completion signal: Milvus reports ``Finished``
+        even when ``indexed_rows`` is 0 and every row is still pending, so a
+        caller that trusts it proceeds to benchmark brute-force scans. Completion
+        is therefore keyed on ``pending_rows`` reaching 0.
+        """
+        limit = self.config.index_timeout if timeout is None else timeout
+        deadline = time.monotonic() + limit
+        state = self.index_state()
+        while True:
+            if on_progress is not None:
+                on_progress(state)
+            if state["state"] == "Failed":
+                raise RuntimeError(f"Milvus index build failed: {state['reason']}")
+            if state["total_rows"] > 0 and state["pending_rows"] == 0:
+                return state
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Milvus index still building after {limit:.0f} s: "
+                    f"indexed={state['indexed_rows']}, pending={state['pending_rows']}"
+                )
+            time.sleep(poll)
+            state = self.index_state()
+
     def _load(self) -> None:
         if not self._loaded:
             self.client.load_collection(
-                self.config.collection_name, timeout=self.config.timeout
+                self.config.collection_name, timeout=self.config.load_timeout
             )
             self._loaded = True
 
@@ -235,7 +298,7 @@ class MilvusVectorDB(VectorDB):
                 "params": dict(self.config.search_params),
             },
             consistency_level=self.config.consistency_level,
-            timeout=self.config.timeout,
+            timeout=self.config.search_timeout,
         )
         results: list[SearchResult] = []
         for hit in response[0] if response else []:

@@ -265,8 +265,9 @@ def prepare_bundle(
             "path": str(paths.model_dir.relative_to(paths.bundle_dir)),
         },
     }
-    if isinstance(previous.get("qdrant"), dict):
-        manifest["qdrant"] = previous["qdrant"]
+    for backend in ("qdrant", "milvus"):
+        if isinstance(previous.get(backend), dict):
+            manifest[backend] = previous[backend]
     atomic_json(paths.manifest_path, manifest)
     status(f"dataset: {len(selected)}/{len(shards)} shards selected")
     return manifest

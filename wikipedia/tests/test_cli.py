@@ -11,12 +11,26 @@ from wikipedia.download import MODEL_REQUIRED_FILES
 class FakeDatabase:
     def __init__(self, config: object) -> None:
         self.config = config
+        self.flushed = 0
 
     def __enter__(self) -> "FakeDatabase":
         return self
 
     def __exit__(self, *_: object) -> None:
         pass
+
+    def flush(self) -> None:
+        self.flushed += 1
+
+    def wait_for_index(self, **_: object) -> dict[str, object]:
+        return {
+            "index_type": "DISKANN",
+            "state": "Finished",
+            "total_rows": 0,
+            "indexed_rows": 0,
+            "pending_rows": 0,
+            "reason": "",
+        }
 
 
 def _prepare(paths: BundlePaths) -> dict[str, object]:
@@ -316,6 +330,7 @@ def test_milvus_keeps_ingest_serial(
         classmethod(lambda cls, bundle_dir=None: paths),
     )
     monkeypatch.setattr(cli, "prepare_bundle", lambda *args, **kwargs: _prepare(paths))
+    monkeypatch.setattr(cli, "ensure_milvus", lambda *args, **kwargs: "ready")
     monkeypatch.setattr(cli, "MilvusVectorDB", FakeDatabase)
     monkeypatch.setattr(
         cli,

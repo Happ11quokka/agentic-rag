@@ -15,7 +15,18 @@ from .download import (
     status,
 )
 from .ingest import default_checkpoint_path, endpoint_fingerprint, ingest_wikipedia
-from .milvus import MilvusConfig, MilvusVectorDB
+from .milvus import (
+    DEFAULT_INDEX_TYPE,
+    DEFAULT_SEARCH_LIST,
+    MilvusConfig,
+    MilvusVectorDB,
+)
+from .milvus_runtime import (
+    DEFAULT_MILVUS_IMAGE,
+    DEFAULT_MILVUS_PROJECT,
+    DEFAULT_MILVUS_URI,
+    ensure_milvus,
+)
 from .qdrant import QdrantConfig, QdrantVectorDB
 from .qdrant_runtime import (
     DEFAULT_QDRANT_CONTAINER,
@@ -26,7 +37,10 @@ from .qdrant_runtime import (
 )
 
 DEFAULT_BATCH_SIZE = 256
+# Milvus round-trips cost more than Qdrant's, so batches are larger by default.
+DEFAULT_MILVUS_BATCH_SIZE = 1000
 DEFAULT_TIMEOUT = 60.0
+DEFAULT_COLLECTION = "wikipedia_2024_06_bge_m3_en_v1"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +108,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grpc-port", type=int)
     parser.add_argument("--uri", help="Milvus URI")
     parser.add_argument("--database", help="Milvus database")
+    parser.add_argument(
+        "--index-type",
+        help=f"Milvus vector index (default: {DEFAULT_INDEX_TYPE})",
+    )
+    parser.add_argument(
+        "--search-list",
+        type=int,
+        help=(
+            "DiskANN candidate pool size; larger raises recall and latency "
+            f"(default: {DEFAULT_SEARCH_LIST})"
+        ),
+    )
+    parser.add_argument(
+        "--milvus-storage-dir",
+        type=Path,
+        help="Local Milvus stack storage (default: <bundle-dir>/milvus)",
+    )
     parser.add_argument("--timeout", type=float)
     return parser
 
@@ -116,6 +147,29 @@ def _recorded_model_revision(paths: BundlePaths) -> str | None:
         return None
     revision = model.get("resolved_revision")
     return revision if isinstance(revision, str) else None
+
+
+def _finalize_milvus_index(database: MilvusVectorDB) -> None:
+    """Seal segments and wait out the index build.
+
+    Without this the newest rows stay in growing segments, where Milvus answers
+    by brute-force scan instead of the on-disk index — which would silently
+    invalidate any latency measured afterwards.
+    """
+    status("flushing Milvus segments so the index can cover every row")
+    database.flush()
+
+    def report(state: dict[str, object]) -> None:
+        status(
+            f"index {state['index_type']}: indexed={state['indexed_rows']:,} "
+            f"pending={state['pending_rows']:,} of {state['total_rows']:,}"
+        )
+
+    final = database.wait_for_index(poll=30.0, on_progress=report)
+    status(
+        f"index ready: type={final['index_type']}, "
+        f"indexed={final['indexed_rows']:,} rows"
+    )
 
 
 def _main(argv: list[str] | None = None) -> None:
@@ -256,16 +310,75 @@ def _main(argv: list[str] | None = None) -> None:
         database = QdrantVectorDB(config)
         metric = config.distance
     else:
-        batch_size = (
-            args.batch_size if args.batch_size is not None else DEFAULT_BATCH_SIZE
+        manifest_milvus = manifest.get("milvus")
+        saved = manifest_milvus if isinstance(manifest_milvus, dict) else {}
+        uri = str(
+            args.uri
+            or os.environ.get("MILVUS_URI")
+            or saved.get("uri")
+            or DEFAULT_MILVUS_URI
         )
-        timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
+        collection = str(
+            args.collection
+            or os.environ.get("MILVUS_COLLECTION")
+            or saved.get("collection")
+            or DEFAULT_COLLECTION
+        )
+        index_type = str(
+            args.index_type or saved.get("index_type") or DEFAULT_INDEX_TYPE
+        ).upper()
+        search_list = (
+            args.search_list
+            if args.search_list is not None
+            else int(saved.get("search_list", DEFAULT_SEARCH_LIST))
+        )
+        batch_size = (
+            args.batch_size
+            if args.batch_size is not None
+            else int(saved.get("batch_size", DEFAULT_MILVUS_BATCH_SIZE))
+        )
+        timeout = (
+            args.timeout
+            if args.timeout is not None
+            else float(saved.get("timeout", DEFAULT_TIMEOUT))
+        )
+        if args.milvus_storage_dir is not None:
+            storage_dir = args.milvus_storage_dir.expanduser().resolve()
+        else:
+            stored_path = saved.get("storage_dir")
+            storage_dir = (
+                Path(str(stored_path)).expanduser().resolve()
+                if stored_path is not None
+                else (paths.bundle_dir / "milvus").resolve()
+            )
+        image = os.environ.get("MILVUS_IMAGE") or str(
+            saved.get("image", DEFAULT_MILVUS_IMAGE)
+        )
+        project = str(saved.get("project", DEFAULT_MILVUS_PROJECT))
+        runtime = ensure_milvus(
+            uri, storage_dir=storage_dir, project=project, image=image
+        )
+        print(f"Milvus runtime: {runtime}")
+        manifest["milvus"] = {
+            "schema_version": 1,
+            "uri": uri,
+            "storage_dir": str(storage_dir),
+            "project": project,
+            "image": image,
+            "database": args.database or os.environ.get("MILVUS_DB_NAME", "default"),
+            "collection": collection,
+            "index_type": index_type,
+            "search_list": search_list,
+            "batch_size": batch_size,
+            "timeout": timeout,
+        }
         config = MilvusConfig(
-            uri=args.uri or os.environ.get("MILVUS_URI", "http://localhost:19530"),
+            uri=uri,
             token=os.environ.get("MILVUS_TOKEN"),
-            database=args.database or os.environ.get("MILVUS_DB_NAME", "default"),
-            collection_name=args.collection
-            or os.environ.get("MILVUS_COLLECTION", "wikipedia_2024_06_bge_m3_en_v1"),
+            database=str(manifest["milvus"]["database"]),
+            collection_name=collection,
+            index_type=index_type,
+            search_params={"search_list": search_list},
             timeout=timeout,
         )
         database = MilvusVectorDB(config)
@@ -281,6 +394,8 @@ def _main(argv: list[str] | None = None) -> None:
         and args.path is None
     ):
         manifest["qdrant"]["checkpoint"] = str(checkpoint)
+    if args.backend == "milvus" and isinstance(manifest.get("milvus"), dict):
+        manifest["milvus"]["checkpoint"] = str(checkpoint)
     atomic_json(paths.manifest_path, manifest)
 
     print(
@@ -319,6 +434,8 @@ def _main(argv: list[str] | None = None) -> None:
             max_workers=ingest_workers,
             worker_database_factory=worker_database_factory,
         )
+        if args.backend == "milvus":
+            _finalize_milvus_index(database)
     manifest["status"] = "complete"
     atomic_json(paths.manifest_path, manifest)
     print(f"Ingested {count} records")
