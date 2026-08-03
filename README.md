@@ -334,7 +334,7 @@ No filters, reranking, sparse, or hybrid search are included.
 # Download and verify pinned main and draft GGUF files.
 uv run download-models
 
-# Select parallel, independent-run, tooluse, or vectordb and enter run counts.
+# Select an experiment, including prefetched-toolcall, and enter run counts.
 uv run run-experiment
 ```
 
@@ -367,14 +367,21 @@ failed runs retain completed JSONL rows and record the failure in `manifest.json
   between queries, zero/one-query regressions, incomplete-run diagnostics, and
   failure statuses. Each request has a 180-second timeout; each multi-turn question
   has a separate 600-second timeout.
+- `prefetched-toolcall` runs the 14B target and 4B draft together. The draft
+  receives the target transcript after each completed target retrieval, issues at
+  most one speculative search, and never changes target results. It reports target
+  end-to-end time, role-separated encoder/Qdrant latency, query coverage and overlap,
+  warm-before-use lead time, cancellation/stale-work counts, and LLM contention
+  diagnostics. Traces retain target outcomes, draft attempts, sync events, and
+  target/draft query associations for comparison with independent runs.
 - `vectordb` runs no LLM. It copies every currently ingested point into identical
   temporary Qdrant collections in RAM and on disk, compares RAM, warmed page cache,
   and best-effort cold-start storage, then deletes the temporary collections.
 
-Tool-use and vector experiments accept a paused, partially ingested Wikipedia
-collection with a warning and the current point count. They refuse to measure while
-ingestion appears active. The `parallel` and `independent-run` experiments have no
-vector-database dependency.
+Tool-use, prefetched-toolcall, and vector experiments accept a paused, partially
+ingested Wikipedia collection with a warning and the current point count. They refuse
+to measure while ingestion appears active. The `parallel` and `independent-run`
+experiments have no vector-database dependency.
 Missing GGUF files produce the `uv run download-models` instruction; missing bundle,
 BGE-M3, Docker, Qdrant, or llama.cpp prerequisites similarly produce specific setup
 guidance. Redirect stdout if a durable report is wanted.

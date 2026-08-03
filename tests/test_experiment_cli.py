@@ -1,6 +1,13 @@
 import pytest
 
-from experiment import cli, independent_run, parallel, tooluse, vectordb
+from experiment import (
+    cli,
+    independent_run,
+    parallel,
+    prefetched_toolcall,
+    tooluse,
+    vectordb,
+)
 from experiment.common import ExperimentError, prompt_positive_int
 
 
@@ -22,6 +29,10 @@ def test_choose_experiment_accepts_name() -> None:
     assert (
         cli.choose_experiment(input_fn=lambda _: "independent-run").name
         == "independent-run"
+    )
+    assert (
+        cli.choose_experiment(input_fn=lambda _: "prefetched-toolcall").name
+        == "prefetched-toolcall"
     )
 
 
@@ -67,6 +78,13 @@ def test_prompt_positive_int_uses_default_and_retries(
             (independent_run.DEFAULT_TASKS, independent_run.DEFAULT_REPETITIONS),
         ),
         (tooluse, (tooluse.DEFAULT_TASKS, tooluse.DEFAULT_REPETITIONS)),
+        (
+            prefetched_toolcall,
+            (
+                prefetched_toolcall.DEFAULT_TASKS,
+                prefetched_toolcall.DEFAULT_REPETITIONS,
+            ),
+        ),
         (vectordb, (vectordb.DEFAULT_QUERIES, vectordb.DEFAULT_REPETITIONS)),
     ],
 )

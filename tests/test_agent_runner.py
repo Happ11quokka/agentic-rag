@@ -1,4 +1,5 @@
 import json
+import threading
 from typing import Any
 
 import httpx
@@ -145,6 +146,28 @@ def test_reasoning_not_added_to_history_and_search_limit_terminates() -> None:
     assert tool["tool_call_id"] == "call_1"
 
 
+def test_retrieval_callback_receives_post_tool_transcript() -> None:
+    snapshots: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+    runner = AgentRunner(
+        LLM([search_call("one"), call("answer")]),
+        Retriever(),
+        generation={},
+        clock_ns=Clock(),
+        on_retrieval_complete=lambda messages, retrieval: snapshots.append(
+            (messages, retrieval)
+        ),
+    )
+
+    result = runner.run(Question("id", "question", ()))
+
+    assert result["terminal_status"] == "final"
+    assert len(snapshots) == 1
+    messages, retrieval = snapshots[0]
+    assert messages[-2]["role"] == "assistant"
+    assert messages[-1]["role"] == "tool"
+    assert retrieval["query"] == "one"
+
+
 def test_invalid_or_multiple_tool_calls_are_protocol_errors() -> None:
     invalid = search_call("one")
     invalid["tool_calls"].append(search_call("two", "call_2")["tool_calls"][0])
@@ -243,3 +266,27 @@ def test_stream_reconstructs_native_tool_call_fragments() -> None:
     assert [item["received_ns"] for item in result["chunks"]] == sorted(
         item["received_ns"] for item in result["chunks"]
     )
+
+
+def test_stream_can_be_cancelled_without_affecting_normal_call_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(200, text="")
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"late"}}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    cancel = threading.Event()
+    cancel.set()
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    llm = LlamaCppClient("http://test", client=client, clock_ns=Clock())
+
+    result = llm.stream_completion(
+        [{"role": "user", "content": "q"}], {}, cancel_event=cancel
+    )
+
+    assert result["cancelled"] is True
+    assert result["chunks"] == []
+    assert result["action_ready_ns"] is None

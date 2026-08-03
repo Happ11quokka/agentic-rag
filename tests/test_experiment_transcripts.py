@@ -1,4 +1,5 @@
 import json
+import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -6,7 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from experiment import artifacts, independent_run, parallel, tooluse
+from experiment import (
+    artifacts,
+    independent_run,
+    parallel,
+    prefetched_toolcall,
+    tooluse,
+)
 from fanoutqa.dataset import Question
 
 
@@ -225,3 +232,154 @@ def test_tooluse_persists_model_turns_queries_and_results(
     assert outcome["retrieval_calls"][0]["query"].startswith("query-")
     assert outcome["retrieval_calls"][0]["results"][0]["snippet"] == "evidence"
     assert summary["roles"]["main"]["valid_metrics"]["queries_per_run"]["count"] == 1
+
+
+def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    question = Question("q1", "question?", ("category",))
+    draft_retrieved = threading.Event()
+    environment = SimpleNamespace(
+        paths=SimpleNamespace(model_dir=tmp_path / "model", bundle_dir=tmp_path),
+        database=SimpleNamespace(
+            config=SimpleNamespace(
+                collection_name="wikipedia", endpoint="http://qdrant"
+            )
+        ),
+        manifest={"dataset": {}, "model": {}},
+        points_count=123,
+        incomplete=False,
+    )
+
+    @contextmanager
+    def wikipedia_environment(*args, **kwargs):
+        yield environment
+
+    def call(messages, *, query=None, content="", cancelled=False):
+        tool_calls = []
+        if query:
+            tool_calls = [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "arguments": json.dumps({"query": query}),
+                    },
+                }
+            ]
+        return {
+            "request": {"messages": deepcopy(messages)},
+            "request_start_ns": 1_000_000,
+            "request_end_ns": 5_000_000,
+            "first_decode_ns": 2_000_000,
+            "chunks": [],
+            "reasoning": "",
+            "content": content,
+            "tool_calls": tool_calls,
+            "finish_reason": "tool_calls" if tool_calls else "stop",
+            "cancelled": cancelled,
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+            "timing": {
+                "request_wall_ms": 4.0,
+                "ttft_ms": 1.0,
+                "server_prompt_ms": 1.0,
+                "server_decode_ms": 2.0,
+                "decode_tokens_per_second": 1.5,
+                "server_decode_tokens": 3,
+            },
+        }
+
+    class Client:
+        def __init__(self, base_url, **kwargs) -> None:
+            self.role = base_url.rsplit("/", 1)[-1]
+            self.calls = 0
+
+        def close(self):
+            pass
+
+        def stream_completion(self, messages, generation, *, cancel_event=None):
+            if messages == [
+                {"role": "user", "content": prefetched_toolcall.FIXED_LLM_WARMUP}
+            ]:
+                return call(messages, content="warm")
+            self.calls += 1
+            if self.role == "main":
+                if self.calls == 1:
+                    assert draft_retrieved.wait(timeout=1)
+                    return call(messages, query="same")
+                return call(messages, content="answer")
+            if self.calls == 1:
+                return call(messages, query="same")
+            assert cancel_event is not None
+            cancel_event.wait(timeout=1)
+            return call(messages, cancelled=True)
+
+    class Retriever:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def search(self, query):
+            if threading.current_thread().name == "prefetched-toolcall-draft":
+                draft_retrieved.set()
+                start, end = 10_000_000, 20_000_000
+            else:
+                start, end = 30_000_000, 40_000_000
+            return {
+                "query": query,
+                "encode_start_ns": start - 2_000_000,
+                "encode_end_ns": start,
+                "encode_duration_ms": 2.0,
+                "qdrant_start_ns": start,
+                "qdrant_end_ns": end,
+                "qdrant_duration_ms": 10.0,
+                "results": [
+                    {
+                        "rank": 1,
+                        "source_id": "source",
+                        "title": "Result",
+                        "url": "https://example.test",
+                        "score": 1.0,
+                        "snippet": "evidence",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(artifacts, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        prefetched_toolcall, "select_benchmark_questions", lambda count: [question]
+    )
+    monkeypatch.setattr(
+        prefetched_toolcall,
+        "require_models",
+        lambda: {"main": Path("/models/main"), "draft": Path("/models/draft")},
+    )
+    monkeypatch.setattr(
+        prefetched_toolcall,
+        "llama_server_binary",
+        lambda: ("llama-server", {"build": 9000}),
+    )
+    monkeypatch.setattr(prefetched_toolcall, "ModelServer", FakeServer)
+    monkeypatch.setattr(prefetched_toolcall, "LlamaCppClient", Client)
+    monkeypatch.setattr(prefetched_toolcall, "prepare_wikipedia", wikipedia_environment)
+    monkeypatch.setattr(
+        prefetched_toolcall, "Encoder", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(prefetched_toolcall, "TimedRetriever", Retriever)
+    monkeypatch.setattr(prefetched_toolcall, "render_report", lambda *args: None)
+
+    prefetched_toolcall.run(1, 1)
+
+    manifest, rows, summary = _run_rows(tmp_path, "prefetched-toolcall")
+    assert manifest["status"] == "completed"
+    assert manifest["parameters"]["target_model_role"] == "main"
+    assert len(rows) == 1
+    assert rows[0]["target_outcome"]["terminal_status"] == "final"
+    assert rows[0]["sync_events"][1]["source"] == "target_retrieval"
+    assert rows[0]["query_pairs"][0]["exact_warm_ready"] is True
+    assert rows[0]["draft_attempts"][0]["retrieval_call"]["query"] == "same"
+    assert summary["metrics"]["target_end_to_end_ms"]["count"] == 1
+    assert (
+        summary["metrics"]["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"]
+        == 1
+    )

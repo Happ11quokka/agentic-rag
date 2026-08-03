@@ -4,7 +4,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import independent_run, parallel, tooluse, vectordb
+from . import independent_run, parallel, prefetched_toolcall, tooluse, vectordb
 from .common import ExperimentError, run_main
 
 
@@ -25,6 +25,11 @@ EXPERIMENTS = (
         independent_run.prompt_and_run,
     ),
     Experiment("tooluse", "separate model tool-use behavior", tooluse.prompt_and_run),
+    Experiment(
+        "prefetched-toolcall",
+        "synchronized draft query prefetch",
+        prefetched_toolcall.prompt_and_run,
+    ),
     Experiment(
         "vectordb", "Qdrant cache, memory, and SSD latency", vectordb.prompt_and_run
     ),

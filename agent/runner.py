@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import statistics
+import threading
 import time
 from copy import deepcopy
 from collections.abc import Callable, Iterable
@@ -210,6 +211,8 @@ class LlamaCppClient:
         self,
         messages: list[dict[str, Any]],
         generation: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         before = self.metrics()
         request_start = self.clock_ns()
@@ -221,6 +224,7 @@ class LlamaCppClient:
         action_ready_ns: int | None = None
         extensions: dict[str, Any] = {}
         usage: dict[str, Any] = {}
+        cancelled = False
         previous_ns = request_start
         payload = {
             "messages": messages,
@@ -235,6 +239,9 @@ class LlamaCppClient:
         ) as response:
             response.raise_for_status()
             for data in _sse_data(response.iter_lines()):
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    break
                 if data == "[DONE]":
                     break
                 event = json.loads(data)
@@ -320,7 +327,11 @@ class LlamaCppClient:
                     if action_ready_ns is None:
                         action_ready_ns = self.clock_ns()
         request_end = self.clock_ns()
-        if action_ready_ns is None and (content_parts or tool_call_parts):
+        if (
+            action_ready_ns is None
+            and not cancelled
+            and (content_parts or tool_call_parts)
+        ):
             action_ready_ns = request_end
         after = self.metrics()
         reasoning = "".join(reasoning_parts)
@@ -346,6 +357,7 @@ class LlamaCppClient:
             "content": content,
             "tool_calls": tool_calls,
             "finish_reason": finish_reason,
+            "cancelled": cancelled,
             "usage": usage,
             "response_extensions": extensions,
             "metrics_delta": metric_deltas(before, after),
@@ -370,6 +382,8 @@ class AgentRunner:
         max_searches: int = 8,
         question_timeout_seconds: float | None = None,
         clock_ns: Callable[[], int] = time.perf_counter_ns,
+        on_retrieval_complete: Callable[[list[dict[str, Any]], dict[str, Any]], None]
+        | None = None,
     ) -> None:
         self.llm = llm
         self.retriever = retriever
@@ -382,6 +396,7 @@ class AgentRunner:
         self.max_searches = max_searches
         self.question_timeout_seconds = question_timeout_seconds
         self.clock_ns = clock_ns
+        self.on_retrieval_complete = on_retrieval_complete
 
     def run(self, question: Question) -> dict[str, Any]:
         messages = initial_messages(question)
@@ -450,6 +465,8 @@ class AgentRunner:
                     "content": render_search_results(retrieval),
                 }
             )
+            if self.on_retrieval_complete is not None:
+                self.on_retrieval_complete(deepcopy(messages), deepcopy(retrieval))
             if len(retrieval_calls) >= self.max_searches:
                 terminal_status = "search_limit"
                 break

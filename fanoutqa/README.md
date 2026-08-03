@@ -18,12 +18,13 @@ uv run run-experiment
 ```
 
 The interactive launcher offers simultaneous main/draft inference, separate tool-use
-phases, and a Qdrant-only storage benchmark. It asks for task/query and repetition counts,
-then prints progress and final metrics to stdout. No experiment configuration or result
-files are written.
+phases, synchronized draft-query prefetch, and a Qdrant-only storage benchmark. It asks
+for task/query and repetition counts, prints progress and final metrics, and writes
+manifests, JSONL traces, and summaries under `experiment/results/`.
 
 Tool-use reuses the Wikipedia bundle selected by `WIKIPEDIA_BUNDLE_DIR` or
 `.wikipedia.local.toml`, starts/reuses Qdrant, loads BGE-M3 once, and runs main and draft
 model phases sequentially. The parallel experiment starts both model servers together and
-does not require Qdrant. SSE timing remains client-observed rather than a claimed GPU-token
-timestamp.
+does not require Qdrant. Prefetched tool calls use both servers and shared Qdrant, with the
+main model as target and one draft query per synchronized target transcript. SSE timing
+remains client-observed rather than a claimed GPU-token timestamp.
