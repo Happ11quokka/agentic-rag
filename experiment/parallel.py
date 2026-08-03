@@ -4,10 +4,12 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from dataclasses import asdict
 from typing import Any
 
 from agent.runner import LlamaCppClient
 
+from .artifacts import RunArtifacts, run_metadata
 from .common import (
     DRAFT_PORT,
     FIXED_LLM_WARMUP,
@@ -31,6 +33,7 @@ from .inference import (
     DEFAULT_TASKS,
     benchmark_messages,
     role_metric_rows,
+    role_metric_summary,
 )
 
 DESCRIPTION = "Measure simultaneous main/draft TTFT and decode throughput"
@@ -123,52 +126,83 @@ def run(task_count: int, repetitions: int) -> None:
     ports = {"main": MAIN_PORT, "draft": DRAFT_PORT}
     calls_by_role: dict[str, list[dict[str, Any]]] = {"main": [], "draft": []}
     combined: list[float] = []
-    with ExitStack() as stack:
-        servers = {
-            role: stack.enter_context(
-                ModelServer(role, binary, model_paths[role], ports[role])
-            )
-            for role in ("main", "draft")
-        }
-        clients = {
-            role: LlamaCppClient(
-                server.base_url, timeout_seconds=REQUEST_TIMEOUT_SECONDS
-            )
-            for role, server in servers.items()
-        }
-
-        def close_clients() -> None:
-            for client in clients.values():
-                client.close()
-
-        stack.callback(close_clients)
-        print("setup: warming both model servers concurrently", flush=True)
-        paired_completion(
-            clients,
-            [{"role": "user", "content": FIXED_LLM_WARMUP}],
-            {**GENERATION, "max_tokens": 32, "temperature": 0},
-        )
-
-        total = task_count * repetitions
-        progress = Progress("parallel", total)
-        completed = 0
-        for repetition in range(repetitions):
-            for question in questions:
-                messages = benchmark_messages(question)
-                calls = paired_completion(clients, messages, GENERATION)
-                for role, call in calls.items():
-                    calls_by_role[role].append(call)
-                value = _combined_throughput(calls)
-                if value is not None:
-                    combined.append(value)
-                completed += 1
-                progress.update(
-                    completed,
-                    f"round={repetition + 1} question={question.id}",
+    metadata = run_metadata(
+        task_count=task_count,
+        repetitions=repetitions,
+        questions=questions,
+        model_paths=model_paths,
+        llama_cpp=version,
+        generation=GENERATION,
+        parameters={"execution": "simultaneous paired inference"},
+    )
+    with RunArtifacts("parallel", metadata) as artifacts:
+        with ExitStack() as stack:
+            servers = {
+                role: stack.enter_context(
+                    ModelServer(role, binary, model_paths[role], ports[role])
                 )
+                for role in ("main", "draft")
+            }
+            clients = {
+                role: LlamaCppClient(
+                    server.base_url, timeout_seconds=REQUEST_TIMEOUT_SECONDS
+                )
+                for role, server in servers.items()
+            }
 
-    if any(not values for values in calls_by_role.values()):
-        raise ExperimentError("parallel experiment produced no complete paired calls")
+            def close_clients() -> None:
+                for client in clients.values():
+                    client.close()
+
+            stack.callback(close_clients)
+            print("setup: warming both model servers concurrently", flush=True)
+            paired_completion(
+                clients,
+                [{"role": "user", "content": FIXED_LLM_WARMUP}],
+                {**GENERATION, "max_tokens": 32, "temperature": 0},
+            )
+
+            total = task_count * repetitions
+            progress = Progress("parallel", total)
+            completed = 0
+            for repetition in range(repetitions):
+                for question in questions:
+                    messages = benchmark_messages(question)
+                    calls = paired_completion(clients, messages, GENERATION)
+                    for role, call in calls.items():
+                        calls_by_role[role].append(call)
+                    value = _combined_throughput(calls)
+                    if value is not None:
+                        combined.append(value)
+                    artifacts.append(
+                        {
+                            "record_type": "paired_completion",
+                            "repetition": repetition + 1,
+                            "question": question.agent_value(),
+                            "model_calls": calls,
+                            "combined_decode_tokens_per_second": value,
+                        }
+                    )
+                    completed += 1
+                    progress.update(
+                        completed,
+                        f"round={repetition + 1} question={question.id}",
+                    )
+
+        if any(not values for values in calls_by_role.values()):
+            raise ExperimentError(
+                "parallel experiment produced no complete paired calls"
+            )
+        artifacts.write_summary(
+            {
+                "metrics": {
+                    "by_role": role_metric_summary(calls_by_role),
+                    "combined_decode_tokens_per_second": asdict(
+                        summarize(combined, higher_is_better=True)
+                    ),
+                }
+            }
+        )
     render_report(calls_by_role, combined)
 
 

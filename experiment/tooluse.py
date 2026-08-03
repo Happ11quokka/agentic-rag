@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any
 
 from agent.retrieval import TimedRetriever
 from agent.runner import AgentRunner, LlamaCppClient
 from wikipedia.encoder import Encoder
 
+from .artifacts import RunArtifacts, run_metadata
 from .common import (
     FIXED_LLM_WARMUP,
     FIXED_RETRIEVAL_WARMUP,
@@ -167,6 +171,36 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
     )
 
 
+def build_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"roles": {}}
+    for role in ("main", "draft"):
+        result = results[role]
+        summary["roles"][role] = {
+            "valid_metrics": {
+                "queries_per_run": asdict(summarize(result["queries"])),
+                "tokens_to_first_query": asdict(summarize(result["first"])),
+                "tokens_between_queries": asdict(summarize(result["between"])),
+            },
+            "incomplete_metrics": {
+                "queries_per_run": asdict(summarize(result["incomplete_queries"])),
+                "tokens_to_first_query": asdict(
+                    summarize(result["incomplete_first"])
+                ),
+                "tokens_between_queries": asdict(
+                    summarize(result["incomplete_between"])
+                ),
+            },
+            "outcomes": {
+                "valid": result["valid"],
+                "failed": result["failed"],
+                "zero_query": result["zero_query"],
+                "one_query": result["one_query"],
+                "failure_statuses": result["failure_statuses"],
+            },
+        }
+    return summary
+
+
 def run(task_count: int, repetitions: int) -> None:
     questions = select_benchmark_questions(task_count)
     model_paths = require_models()
@@ -189,47 +223,98 @@ def run(task_count: int, repetitions: int) -> None:
         print("setup: warming retrieval", flush=True)
         retriever.search(FIXED_RETRIEVAL_WARMUP)
 
-        total = task_count * repetitions * 2
-        progress = Progress("tooluse", total)
-        completed = 0
-        for role in ("main", "draft"):
-            with ModelServer(
-                role,
-                binary,
-                model_paths[role],
-                MAIN_PORT,
-                reasoning_budget=REASONING_BUDGET_TOKENS,
-            ) as server:
-                client = LlamaCppClient(
-                    server.base_url, timeout_seconds=REQUEST_TIMEOUT_SECONDS
-                )
-                try:
-                    client.stream_completion(
-                        [{"role": "user", "content": FIXED_LLM_WARMUP}],
-                        {**GENERATION, "max_tokens": 32, "temperature": 0},
+        wiki_manifest = environment.manifest
+        metadata = run_metadata(
+            task_count=task_count,
+            repetitions=repetitions,
+            questions=questions,
+            model_paths=model_paths,
+            llama_cpp=version,
+            generation=GENERATION,
+            parameters={
+                "execution": "isolated non-overlapping model phases",
+                "reasoning_budget_tokens": REASONING_BUDGET_TOKENS,
+                "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+                "question_timeout_seconds": QUESTION_TIMEOUT_SECONDS,
+                "max_searches": MAX_SEARCHES,
+                "retrieval": {
+                    "top_k": RETRIEVAL_TOP_K,
+                    "max_chars_per_result": RETRIEVAL_MAX_CHARS,
+                },
+                "wikipedia": {
+                    "collection": environment.database.config.collection_name,
+                    "endpoint": environment.database.config.endpoint,
+                    "points_count": environment.points_count,
+                    "incomplete": environment.incomplete,
+                    "dataset_revision": wiki_manifest.get("dataset", {}).get(
+                        "resolved_revision"
+                    ),
+                    "model_revision": wiki_manifest.get("model", {}).get(
+                        "resolved_revision"
+                    ),
+                    "manifest_sha256": hashlib.sha256(
+                        json.dumps(
+                            wiki_manifest, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                },
+            },
+        )
+        with RunArtifacts("tooluse", metadata) as artifacts:
+            total = task_count * repetitions * 2
+            progress = Progress("tooluse", total)
+            completed = 0
+            for role in ("main", "draft"):
+                with ModelServer(
+                    role,
+                    binary,
+                    model_paths[role],
+                    MAIN_PORT,
+                    reasoning_budget=REASONING_BUDGET_TOKENS,
+                ) as server:
+                    client = LlamaCppClient(
+                        server.base_url, timeout_seconds=REQUEST_TIMEOUT_SECONDS
                     )
-                    runner = AgentRunner(
-                        client,
-                        retriever,
-                        generation=GENERATION,
-                        max_searches=MAX_SEARCHES,
-                        question_timeout_seconds=QUESTION_TIMEOUT_SECONDS,
-                    )
-                    for repetition in range(repetitions):
-                        for question in questions:
-                            outcome = runner.run(question)
-                            selected = results[role]
-                            _record_outcome(selected, outcome)
-                            completed += 1
-                            progress.update(
-                                completed,
-                                f"role={role} round={repetition + 1} question={question.id}",
-                            )
-                finally:
-                    client.close()
+                    try:
+                        client.stream_completion(
+                            [{"role": "user", "content": FIXED_LLM_WARMUP}],
+                            {**GENERATION, "max_tokens": 32, "temperature": 0},
+                        )
+                        runner = AgentRunner(
+                            client,
+                            retriever,
+                            generation=GENERATION,
+                            max_searches=MAX_SEARCHES,
+                            question_timeout_seconds=QUESTION_TIMEOUT_SECONDS,
+                        )
+                        for repetition in range(repetitions):
+                            for question in questions:
+                                outcome = runner.run(question)
+                                artifacts.append(
+                                    {
+                                        "record_type": "agent_run",
+                                        "model_role": role,
+                                        "repetition": repetition + 1,
+                                        "question": question.agent_value(),
+                                        "outcome": outcome,
+                                    }
+                                )
+                                selected = results[role]
+                                _record_outcome(selected, outcome)
+                                completed += 1
+                                progress.update(
+                                    completed,
+                                    (
+                                        f"role={role} round={repetition + 1} "
+                                        f"question={question.id}"
+                                    ),
+                                )
+                    finally:
+                        client.close()
 
-    if sum(result["valid"] for result in results.values()) == 0:
-        raise ExperimentError("tool-use experiment produced no valid runs")
+            if sum(result["valid"] for result in results.values()) == 0:
+                raise ExperimentError("tool-use experiment produced no valid runs")
+            artifacts.write_summary(build_summary(results))
     render_report(results)
 
 

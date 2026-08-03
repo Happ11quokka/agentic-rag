@@ -215,9 +215,14 @@ def test_stream_reconstructs_native_tool_call_fragments() -> None:
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     llm = LlamaCppClient("http://test", client=client, clock_ns=Clock())
+    messages = [{"role": "user", "content": "q"}]
 
-    result = llm.stream_completion([{"role": "user", "content": "q"}], {})
+    result = llm.stream_completion(messages, {"seed": 42})
+    messages[0]["content"] = "changed later"
 
+    assert result["request"]["messages"] == [{"role": "user", "content": "q"}]
+    assert result["request"]["seed"] == 42
+    assert result["request"]["stream"] is True
     assert result["reasoning"] == "why"
     assert result["content"] == ""
     assert result["tool_calls"] == [

@@ -6,6 +6,7 @@ from typing import Any
 
 from agent.runner import LlamaCppClient
 
+from .artifacts import RunArtifacts, run_metadata
 from .common import (
     DRAFT_PORT,
     FIXED_LLM_WARMUP,
@@ -27,6 +28,7 @@ from .inference import (
     DEFAULT_TASKS,
     benchmark_messages,
     role_metric_rows,
+    role_metric_summary,
 )
 
 DESCRIPTION = "Measure isolated main/draft TTFT and decode throughput"
@@ -69,6 +71,7 @@ def run(task_count: int, repetitions: int) -> None:
     total = task_count * repetitions * 2
     progress = Progress("independent-run", total)
     completed = 0
+    artifacts: RunArtifacts
 
     def server_factory(role: str) -> ModelServer:
         return ModelServer(role, binary, model_paths[role], ports[role])
@@ -90,6 +93,15 @@ def run(task_count: int, repetitions: int) -> None:
                         benchmark_messages(question), GENERATION
                     )
                     calls_by_role[role].append(call)
+                    artifacts.append(
+                        {
+                            "record_type": "model_completion",
+                            "model_role": role,
+                            "repetition": repetition + 1,
+                            "question": question.agent_value(),
+                            "model_call": call,
+                        }
+                    )
                     completed += 1
                     progress.update(
                         completed,
@@ -101,11 +113,24 @@ def run(task_count: int, repetitions: int) -> None:
         finally:
             client.close()
 
-    run_phases(("main", "draft"), server_factory, run_role)
+    metadata = run_metadata(
+        task_count=task_count,
+        repetitions=repetitions,
+        questions=questions,
+        model_paths=model_paths,
+        llama_cpp=version,
+        generation=GENERATION,
+        parameters={"execution": "isolated non-overlapping model phases"},
+    )
+    with RunArtifacts("independent-run", metadata) as artifacts:
+        run_phases(("main", "draft"), server_factory, run_role)
 
-    if any(not values for values in calls_by_role.values()):
-        raise ExperimentError(
-            "independent-run experiment produced no complete model calls"
+        if any(not values for values in calls_by_role.values()):
+            raise ExperimentError(
+                "independent-run experiment produced no complete model calls"
+            )
+        artifacts.write_summary(
+            {"metrics": {"by_role": role_metric_summary(calls_by_role)}}
         )
     render_report(calls_by_role)
 

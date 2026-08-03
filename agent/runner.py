@@ -5,6 +5,7 @@ import json
 import math
 import statistics
 import time
+from copy import deepcopy
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -227,6 +228,7 @@ class LlamaCppClient:
             "stream_options": {"include_usage": True},
         }
         payload.update(generation)
+        request = deepcopy(payload)
 
         with self.client.stream(
             "POST", f"{self.base_url}/v1/chat/completions", json=payload
@@ -325,6 +327,7 @@ class LlamaCppClient:
         content = "".join(content_parts)
         tool_calls = [tool_call_parts[index] for index in sorted(tool_call_parts)]
         call = {
+            "request": request,
             "request_start_ns": request_start,
             "request_end_ns": request_end,
             "first_decode_ns": chunks[0]["received_ns"] if chunks else None,

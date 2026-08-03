@@ -340,7 +340,21 @@ uv run run-experiment
 
 `run-experiment` is intentionally interactive and accepts no arguments. Each
 orchestrator uses Python constants instead of TOML configuration, prepares its
-runtime, prints progress, and writes its final metric table to stdout only.
+runtime, prints progress and its final metric table, and stores benchmark records
+under `experiment/results/`:
+
+```text
+experiment/results/<experiment>/<UTC-timestamp>-<short-id>/
+├── manifest.json   # run status, inputs, revisions, and configuration
+├── traces.jsonl    # one fsync'd record per completed benchmark unit
+└── summary.json    # structured form of the final metric report
+```
+
+Trace records include each exact llama.cpp request, reasoning and content output,
+native tool calls, streamed chunks, usage, and timing. Tool-use traces additionally
+include every search query and the exact truncated result snippets returned to the
+model. Warmup calls and llama-server logs are intentionally excluded. Interrupted or
+failed runs retain completed JSONL rows and record the failure in `manifest.json`.
 
 - `parallel` starts Qwen3 14B and 4B servers together, sends paired identical
   FanOutQA prompts, and reports TTFT plus per-model and combined decode throughput.
