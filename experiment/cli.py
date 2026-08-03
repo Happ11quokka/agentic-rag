@@ -31,7 +31,7 @@ EXPERIMENTS = (
         prefetched_toolcall.prompt_and_run,
     ),
     Experiment(
-        "vectordb", "Qdrant cache, memory, and SSD latency", vectordb.prompt_and_run
+        "vectordb", "Qdrant cache hit and non-hit latency", vectordb.prompt_and_run
     ),
 )
 

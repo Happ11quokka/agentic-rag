@@ -365,62 +365,27 @@ def test_tooluse_report_shows_incomplete_metrics_and_failure_status(
     assert ["draft", "none", "0"] in rows
 
 
-def test_vectordb_collection_modes_are_controlled() -> None:
-    calls: list[dict[str, object]] = []
+def test_vectordb_report_has_only_hit_and_non_hit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vectordb.render_report({"hit": [1.0], "non-hit": [2.0]}, 123_456)
 
-    class Client:
-        def create_collection(self, **kwargs):
-            calls.append(kwargs)
-            return True
-
-    names = vectordb.TemporaryCollections("memory", "disk")
-    vectordb.create_collections(
-        Client(), names, float16=True, dimension=1024, distance="DOT"
-    )
-    assert [call["collection_name"] for call in calls] == ["memory", "disk"]
-    assert [call["vectors_config"].on_disk for call in calls] == [False, True]
-    assert [call["on_disk_payload"] for call in calls] == [False, True]
+    output = capsys.readouterr().out
+    rows = [line.split() for line in output.splitlines()]
+    assert ["hit", "1", "1.00", "1.00", "1.00", "0.00"] in rows
+    assert ["non-hit", "1", "2.00", "2.00", "2.00", "0.00"] in rows
+    assert "memory" not in output
 
 
-def test_vectordb_points_are_copied_identically() -> None:
-    upserts: list[tuple[str, list[object]]] = []
-    records = [
-        SimpleNamespace(id=1, vector=[0.1, 0.2], payload={"text": "one"}),
-        SimpleNamespace(id=2, vector=[0.3, 0.4], payload={"text": "two"}),
-    ]
-
-    class Client:
-        def scroll(self, **kwargs):
-            return records, None
-
-        def upsert(self, *, collection_name, points, wait):
-            assert wait is True
-            upserts.append((collection_name, points))
-
-    vectordb.copy_points(
-        Client(),
-        "source",
-        vectordb.TemporaryCollections("memory", "disk"),
-        count=2,
-    )
-
-    assert [name for name, _ in upserts] == ["memory", "disk"]
-    assert [point.id for point in upserts[0][1]] == [1, 2]
-    assert upserts[0][1] == upserts[1][1]
-
-
-def test_vectordb_run_uses_every_available_point(
+def test_vectordb_run_measures_source_non_hit_then_hit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     point_count = 123_456
-    copied: list[int] = []
-    optimized: list[int] = []
-    reported: list[int] = []
+    measurements: list[tuple[str, str, bool]] = []
+    warmed: list[tuple[object, str, list[float]]] = []
+    reported: list[tuple[dict[str, list[float]], int]] = []
     config = SimpleNamespace(
         url=vectordb.DEFAULT_QDRANT_URL,
-        float16=True,
-        dimension=2,
-        distance="DOT",
         collection_name="source",
     )
     environment = SimpleNamespace(
@@ -462,31 +427,46 @@ def test_vectordb_run_uses_every_available_point(
     monkeypatch.setattr(vectordb, "prepare_wikipedia", prepare_wikipedia)
     monkeypatch.setattr(vectordb, "Encoder", Encoder)
     monkeypatch.setattr(vectordb, "QdrantVectorDB", Database)
-    monkeypatch.setattr(vectordb, "create_collections", lambda *args, **kwargs: None)
+
+    def measure_rounds(
+        environment,
+        collection,
+        vectors,
+        repetitions,
+        *,
+        label,
+        restart_each_round=False,
+    ):
+        assert vectors == [[0.1, 0.2]]
+        assert repetitions == 1
+        measurements.append((collection, label, restart_each_round))
+        return [1.0 if label == "non-hit" else 2.0]
+
+    monkeypatch.setattr(vectordb, "measure_rounds", measure_rounds)
     monkeypatch.setattr(
         vectordb,
-        "copy_points",
-        lambda client, source, names, count: copied.append(count),
+        "query_latency_ms",
+        lambda client, collection, vector: warmed.append(
+            (client, collection, vector)
+        )
+        or 1.0,
     )
-    monkeypatch.setattr(
-        vectordb,
-        "wait_until_optimized",
-        lambda client, collection, count: optimized.append(count),
-    )
-    monkeypatch.setattr(vectordb, "measure_rounds", lambda *args, **kwargs: [1.0])
-    monkeypatch.setattr(vectordb, "query_latency_ms", lambda *args, **kwargs: 1.0)
     monkeypatch.setattr(
         vectordb,
         "render_report",
-        lambda latencies, count: reported.append(count),
+        lambda latencies, count: reported.append((latencies, count)),
     )
-    monkeypatch.setattr(vectordb, "delete_collections", lambda *args: None)
 
     vectordb.run(query_count=1, repetitions=1)
 
-    assert copied == [point_count]
-    assert optimized == [point_count, point_count]
-    assert reported == [point_count]
+    assert measurements == [
+        ("source", "non-hit", True),
+        ("source", "hit", False),
+    ]
+    assert [(collection, vector) for _, collection, vector in warmed] == [
+        ("source", [0.1, 0.2])
+    ]
+    assert reported == [({"non-hit": [1.0], "hit": [2.0]}, point_count)]
 
 
 def test_query_latency_checks_results() -> None:

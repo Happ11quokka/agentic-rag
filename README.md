@@ -374,9 +374,10 @@ failed runs retain completed JSONL rows and record the failure in `manifest.json
   warm-before-use lead time, cancellation/stale-work counts, and LLM contention
   diagnostics. Traces retain target outcomes, draft attempts, sync events, and
   target/draft query associations for comparison with independent runs.
-- `vectordb` runs no LLM. It copies every currently ingested point into identical
-  temporary Qdrant collections in RAM and on disk, compares RAM, warmed page cache,
-  and best-effort cold-start storage, then deletes the temporary collections.
+- `vectordb` runs no LLM. It measures the existing Qdrant collection directly,
+  comparing warmed cache hits with best-effort non-hits after restarting Qdrant before
+  each repetition round. It does not evict the host OS page cache, so later queries may
+  benefit from warming.
 
 Tool-use, prefetched-toolcall, and vector experiments accept a paused, partially
 ingested Wikipedia collection with a warning and the current point count. They refuse
