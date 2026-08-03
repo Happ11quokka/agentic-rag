@@ -125,6 +125,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Local Milvus stack storage (default: <bundle-dir>/milvus)",
     )
+    parser.add_argument(
+        "--milvus-upsert",
+        action="store_true",
+        help=(
+            "write with upsert instead of insert; idempotent but costs one delete "
+            "tombstone per record. Needed only when resuming into rows that may "
+            "already exist"
+        ),
+    )
     parser.add_argument("--timeout", type=float)
     return parser
 
@@ -379,6 +388,7 @@ def _main(argv: list[str] | None = None) -> None:
             collection_name=collection,
             index_type=index_type,
             search_params={"search_list": search_list},
+            upsert_existing=args.milvus_upsert,
             timeout=timeout,
         )
         database = MilvusVectorDB(config)

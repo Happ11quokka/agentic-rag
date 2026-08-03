@@ -24,6 +24,14 @@ class MilvusConfig:
     load_timeout: float = 1800.0
     index_timeout: float = 14400.0
     search_timeout: float = 3600.0
+    # Milvus implements upsert as delete + insert, so a bulk load into a fresh
+    # collection writes one delete tombstone per record and then spends the disk
+    # compacting them away. Measured on the external HDD: ingesting 200k records
+    # produced ~188k delete entries whose compaction saturated the disk and
+    # starved the shard downloads. Insert is the correct write for a load that
+    # has nothing to overwrite; enable upsert only when resuming into rows that
+    # may already exist.
+    upsert_existing: bool = False
     consistency_level: str = "Bounded"
     dimension: int = 1024
     metric_type: str = "IP"
@@ -215,7 +223,10 @@ class MilvusVectorDB(VectorDB):
                     "embedding": list(record.embedding),
                 }
             )
-        response = self.client.upsert(
+        write = (
+            self.client.upsert if self.config.upsert_existing else self.client.insert
+        )
+        response = write(
             collection_name=self.config.collection_name,
             data=rows,
             timeout=self.config.timeout,
