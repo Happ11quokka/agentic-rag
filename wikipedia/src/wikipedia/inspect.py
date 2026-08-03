@@ -258,15 +258,25 @@ def _open_milvus(args: argparse.Namespace, summary: BundleSummary) -> Any:
         f"state={state['state']}, rows={state['total_rows']:,}, "
         f"indexed={state['indexed_rows']:,}, pending={state['pending_rows']:,}"
     )
-    if state["pending_rows"]:
+    # pending_rows is not a usable signal here — Milvus 2.5.27 reports it equal to
+    # total_rows once the build is done. Uncovered rows show up as indexed < total.
+    uncovered = state["total_rows"] - state["indexed_rows"]
+    if uncovered > 0:
         print(
-            f"warning: {state['pending_rows']:,} rows are not covered by the index; "
-            "those segments are answered by brute-force scan, so latency below is "
-            "not a clean on-disk index measurement",
+            f"warning: {uncovered:,} rows are not covered by the index; those "
+            "segments are answered by brute-force scan, so latency below is not a "
+            "clean on-disk index measurement",
             file=sys.stderr,
             flush=True,
         )
     print(f"search_list: {search_list}")
+
+    # Load before benchmarking so the first query does not report the cost of
+    # reading the on-disk index off the storage medium as its search latency.
+    print("milvus: loading collection", flush=True)
+    started = time.perf_counter()
+    database.load()
+    print(f"milvus: collection loaded in {time.perf_counter() - started:.1f} s")
     return database
 
 

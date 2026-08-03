@@ -313,12 +313,20 @@ class MilvusVectorDB(VectorDB):
             time.sleep(poll)
             state = self.index_state()
 
-    def _load(self) -> None:
+    def load(self) -> None:
+        """Pull the index into the query node.
+
+        Worth calling explicitly before a benchmark: for an on-disk index this
+        reads the index off the storage medium and takes far longer than a query,
+        so leaving it to the first search reports load time as search latency.
+        """
         if not self._loaded:
             self.client.load_collection(
                 self.config.collection_name, timeout=self.config.load_timeout
             )
             self._loaded = True
+
+    _load = load
 
     def search(self, vector: Any, *, limit: int = 10) -> list[SearchResult]:
         if limit < 1:
