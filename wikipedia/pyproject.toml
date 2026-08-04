@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 wikipedia-ingest = "wikipedia.cli:main"
 wikipedia-inspect = "wikipedia.inspect:main"
+wikipedia-prefetch = "wikipedia.prefetch_bench:main"
 
 [build-system]
 requires = ["uv_build>=0.9.11,<0.10.0"]
