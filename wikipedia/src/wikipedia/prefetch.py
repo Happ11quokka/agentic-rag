@@ -177,6 +177,10 @@ class PrefetchingRetriever:
         self.cache = PrefetchCache()
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
+        # Guards stats. Everything the agent's own thread records is serial,
+        # but a miss leaves its speculative search running while the next hop
+        # spawns another, so two prefetch threads can bump these at once.
+        self._stats_lock = threading.Lock()
 
     def retrieve(self, query: str, state: AgentState) -> list[SearchResult]:
         """Answer `query`, then sync the resulting state to the drafter."""
@@ -234,11 +238,13 @@ class PrefetchingRetriever:
     def _predict_and_prefetch(self, state: AgentState, answered: str) -> None:
         # Every failure here degrades to a miss. The drafter is an accelerator;
         # it must never be able to break or alter the retrieval it speculates on.
-        self.stats.attempts += 1
+        with self._stats_lock:
+            self.stats.attempts += 1
         try:
             predicted = self.predictor.predict(state)  # type: ignore[union-attr]
         except Exception:
-            self.stats.errors += 1
+            with self._stats_lock:
+                self.stats.errors += 1
             return
         if not predicted:
             return
@@ -258,7 +264,8 @@ class PrefetchingRetriever:
                 self.database, self.encoder, predicted, limit=self.limit
             )
         except Exception:
-            self.stats.errors += 1
+            with self._stats_lock:
+                self.stats.errors += 1
         finally:
             entry.finished = time.perf_counter()
             entry.done.set()

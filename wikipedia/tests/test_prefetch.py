@@ -1,5 +1,7 @@
+import json
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from fakes import (
@@ -407,3 +409,87 @@ def test_http_predictor_does_not_mistake_research_for_a_search_action() -> None:
     )
 
     assert predictor.predict(AgentState(question="Q")) is None
+
+
+def test_http_predictor_default_transport_speaks_to_a_real_server() -> None:
+    """Exercise the urllib path, which every injected-transport test skips."""
+    received: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            received.append(
+                {
+                    "path": self.path,
+                    "content_type": self.headers["Content-Type"],
+                    "body": json.loads(self.rfile.read(length).decode("utf-8")),
+                }
+            )
+            payload = json.dumps(
+                {"choices": [{"message": {"content": "Action: search[solar wind]"}}]}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        predictor = HTTPPredictor(
+            f"http://127.0.0.1:{server.server_port}", model="test-model", timeout=5
+        )
+        prediction = predictor.predict(AgentState(question="What causes auroras?"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert prediction == "solar wind"
+    assert received[0]["path"] == "/v1/chat/completions"
+    assert received[0]["content_type"] == "application/json"
+    assert received[0]["body"]["model"] == "test-model"
+    assert received[0]["body"]["stream"] is False
+
+
+def test_http_predictor_survives_a_server_that_is_not_listening() -> None:
+    predictor = HTTPPredictor("http://127.0.0.1:1", model="m", timeout=2)
+
+    assert predictor.predict(AgentState(question="Q")) is None
+
+
+def test_concurrent_prefetch_threads_do_not_lose_stat_increments() -> None:
+    """attempts/errors are incremented off the agent's thread, by more than one.
+
+    A miss leaves its speculative search running while the next hop spawns
+    another, so two prefetch threads overlap. These counters are experiment
+    output, and a lost increment would understate the work silently.
+    """
+    barrier = threading.Barrier(24)
+
+    class RacingPredictor:
+        def predict(self, state: AgentState) -> str | None:
+            barrier.wait(timeout=10)
+            raise RuntimeError("always fails, so attempts and errors both move")
+
+    retriever = PrefetchingRetriever(
+        FakeDatabase(), FakeEncoder(), predictor=RacingPredictor()
+    )
+    threads = [
+        threading.Thread(
+            target=retriever._predict_and_prefetch,
+            args=(AgentState(question="Q"), "answered"),
+        )
+        for _ in range(24)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert retriever.stats.attempts == 24
+    assert retriever.stats.errors == 24
