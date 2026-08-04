@@ -65,19 +65,31 @@ cd "$ROOT" || exit 1
 caffeinate -ims uv run wikipedia-inspect --backend milvus \
     --bundle-dir "$BUNDLE" --runs 10 --search-list 100 --load-timeout 3600 >> "$OUT" 2>&1
 
+# Match the decode gap to the retrieval it has to hide.
+#
+# prefetch can hide at most min(retrieval, decode) per hop. Picking the gap
+# blind would decide the answer before measuring it: a 2 s gap against a 40 s
+# search reports "prefetch recovers 5%" -- which is arithmetic about the gap,
+# not a finding about prefetch. The regime the research question lives in is
+# retrieval ~= decode, so take the median search just measured and use that.
+MEDIAN=$(grep -oE "median=[0-9.]+ ms" "$OUT" | tail -1 | grep -oE "[0-9.]+")
+if [ -n "$MEDIAN" ]; then
+    DECODE=$(awk "BEGIN{printf \"%.2f\", $MEDIAN/1000}")
+else
+    DECODE=2.00
+fi
+
 {
     echo
     echo "=== paired prefetch experiment ==="
+    echo "decode gap set to ${DECODE}s from the measured median retrieval (${MEDIAN:-unknown} ms)"
 } >> "$OUT"
-# --decode-seconds stands in for the target model decoding the next thought.
-# There is no target model on this machine, so it is an input to the result and
-# the report prints it as such.
 caffeinate -ims uv run wikipedia-prefetch \
     --bundle-dir "$BUNDLE" \
-    --episodes 4 \
+    --episodes 5 \
     --limit 5 \
     --search-list 100 \
-    --decode-seconds 2.0 \
+    --decode-seconds "$DECODE" \
     --think-seconds 0.4 \
     --wrong-hops 2 \
     --json "$JSON" >> "$OUT" 2>&1
