@@ -530,6 +530,33 @@ cap=16 → committedMemSize ≈ 2,164 MB
 > 되돌릴 때는 같은 키를 지운다: `etcdctl del "by-dev/config/queryCoord.taskExecutionCap"`.
 > compose의 값이 다시 기본이 되므로, **오래 갈 설정은 반드시 템플릿에도 넣어야 한다.**
 
+#### 로드 중 메모리는 로그가 아니라 프로세스에서 읽는다
+
+로드가 진행되면서 `memUsage`가 오르는 것을 보고 "이대로면 천장을 넘겠다"고 두 번 잘못
+계산했다. `memUsage`는 **항이 두 개고 둘 다 움직인다.** 한쪽을 고정으로 놓고 나머지를
+추정하면 틀린다.
+
+```
+memUsage = GetUsedMemoryCount() + committedMemSize
+12% 시점: committed 2,192 MB
+56% 시점: committed 4,803 MB   ← 이게 오른 걸 모르고 전부 실사용 증가로 돌렸다
+```
+
+실사용은 프로세스에서 직접 읽으면 된다. `GetUsedMemoryCount()`가 곧 `RssAnon`이므로:
+
+```bash
+docker exec wikipedia-milvus sh -c 'grep -E "^(RssAnon|RssFile)" /proc/8/status'
+# RssAnon: 7,596 MB @ 56%   ← 이게 가드가 세는 값
+# RssFile:   174 MB         ← mmap된 payload. 가드에서 빠진다
+```
+
+실측 기울기는 **약 95 MB / 진행률 1%p**이고, 100%에서 약 11.7 GB로 수렴한다.
+천장(26,619 MB)까지 여유가 충분하다. 로그에서 역산한 추정치(27 GB)는 틀렸다.
+
+> `committedMemSize`가 cap × 130 MB보다 큰 것도 여기서 드러났다 —
+> `taskExecutionCap`은 **태스크** 수를 막는 것이지 세그먼트 수를 막는 게 아니다.
+> 태스크 하나가 세그먼트 여러 개를 요청할 수 있다.
+
 #### 잠복 — 디스크 가드는 엉뚱한 파일시스템을 본다
 
 아직 안 터졌지만 기록해 둔다. 컨테이너 안에서 `df /var/lib/milvus`는 macOS 부트 볼륨
