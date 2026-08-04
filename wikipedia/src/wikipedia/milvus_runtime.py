@@ -247,6 +247,15 @@ def mounted_storage(container: str, destination: str = "/var/lib/milvus") -> Pat
     return Path(source).resolve() if source else None
 
 
+# Restarting the standalone container is expensive in a way nothing warns about:
+# Milvus treats local storage as a cache it owns and empties it at startup
+# ("Clean local data cache" in roles.go). A loaded 10M collection left 93 GB
+# under volumes/milvus/data and had 6.2 GB left seconds after a restart, so the
+# DiskANN index is re-fetched from MinIO -- which lives on the same spindle,
+# making a restart cost ~93 GB read plus ~93 GB written, measured at ~5 hours.
+#
+# So batch anything that recreates the container, and prefer etcd for settings
+# that are refreshable (queryCoord.taskExecutionCap is).
 def ensure_milvus(
     uri: str,
     *,

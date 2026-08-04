@@ -460,6 +460,19 @@ sets five values to get past it; the diagnosis is in
 | `queryCoord.channelTaskTimeout` | 60 s | 600 s | Same problem, channel subscription |
 | `queryCoord.overloadedMemoryThresholdPercentage` | 90 | 95 | Margin only; it fixes nothing on its own |
 
+**Do not restart Milvus with a large collection loaded.** Milvus empties its
+local storage at startup, so the DiskANN index is re-fetched from MinIO — which
+is on the same disk. A loaded 10M collection had 93 GB under
+`volumes/milvus/data` and 6.2 GB seconds after a restart; refilling it took
+about five hours, with per-segment load going from ~2 min (files already local)
+to 7–9 min (cold). Batch anything that recreates the container, and use etcd for
+settings that are refreshable:
+
+```bash
+docker exec wikipedia-milvus-etcd \
+  etcdctl put "by-dev/config/queryCoord.taskExecutionCap" "16"
+```
+
 **Size the Docker VM for the search step, not the load step.** Loading only
 needs the VM; searching needs the VM *and* BGE-M3 on the host. At 28 GB of a
 36 GB host the two did not fit — the first search after a completed load
