@@ -460,6 +460,14 @@ sets five values to get past it; the diagnosis is in
 | `queryCoord.channelTaskTimeout` | 60 s | 600 s | Same problem, channel subscription |
 | `queryCoord.overloadedMemoryThresholdPercentage` | 90 | 95 | Margin only; it fixes nothing on its own |
 
+**Size the Docker VM for the search step, not the load step.** Loading only
+needs the VM; searching needs the VM *and* BGE-M3 on the host. At 28 GB of a
+36 GB host the two did not fit — the first search after a completed load
+exhausted swap (25.4 GB of 26.6 GB) and macOS killed Docker Desktop. 22 GB
+leaves the guard 4.8 GB over the measured peak (`RssAnon` 11.3 GB +
+`committedMemSize` 4.8 GB) and the host 14 GB. A smaller VM also means less
+page cache, which strengthens the HDD treatment rather than weakening it.
+
 Two things that look like fixes and are not. Dropping the VM page cache does
 nothing — `GetUsedMemoryCount` reads `RSS - Shared` from statm, so file-backed
 pages are excluded by construction. Setting `mem_limit` makes it worse: Milvus

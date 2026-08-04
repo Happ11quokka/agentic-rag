@@ -530,6 +530,43 @@ cap=16 → committedMemSize ≈ 2,164 MB
 > 되돌릴 때는 같은 키를 지운다: `etcdctl del "by-dev/config/queryCoord.taskExecutionCap"`.
 > compose의 값이 다시 기본이 되므로, **오래 갈 설정은 반드시 템플릿에도 넣어야 한다.**
 
+#### 로드는 끝났는데 첫 검색에서 Docker Desktop이 죽었다
+
+5시간 걸려 로드가 100%에 닿았고, `wikipedia-inspect`가 인코더를 올린 직후
+(`encoder: ready in 41.6 s`) 검색에서 죽었다.
+
+```
+MilvusException: Fail connecting to server on localhost:19530
+$ docker ps
+Error response from daemon: Docker Desktop is unable to start
+```
+
+Milvus가 아니라 **Docker Desktop 자체**가 죽었다. 원인은 호스트 메모리다.
+
+```
+vm.swapusage: used = 25,423 MB / 26,624 MB   ← 스왑이 거의 소진
+```
+
+산수가 안 맞았다. 호스트는 36 GB인데 **Docker VM에 28 GB를 예약**해 뒀다. 로드가 끝난
+시점 Milvus가 VM 안에서 11.3 GB를 쓰고 있었고, 여기에 검색 단계에서 **BGE-M3(2.1 GB)가
+호스트 쪽에** 올라온다. 남은 8 GB로 macOS와 파이썬 프로세스를 감당할 수 없어 스왑이
+터졌고 macOS가 Docker를 죽였다.
+
+> **적재/로드와 검색은 메모리 요구가 다르다.** 적재 중에는 VM만 크면 됐지만, 검색에는
+> VM *과* 인코더가 동시에 필요하다. 28 GB는 앞 단계 기준으로 정한 값이었다.
+
+**처치**: VM 28 GB → **22 GB**. 로드 실측 최대치가 `RssAnon 11.3 GB + committed 4.8 GB
+= 16.1 GB`이므로 가드 천장(0.95 × 21,984 = 20,885 MB)에 4.8 GB 여유가 있고, 호스트에는
+14 GB가 남는다. 종전 설정은
+`~/Library/Group Containers/group.com.docker/settings-store.json.bak-before-22g`에 있다.
+
+부수 효과로 **페이지 캐시가 줄어 HDD 처치가 오히려 강해진다.** 3절에서 램 증설이 검색을
+못 고쳤다는 결과를 이미 얻었으므로 방향은 문제없지만, 이 변경 이후 수치는 28 GB 시절과
+같은 조건이 아니다.
+
+**다행히 다시 5시간은 아니다.** 로컬 스토리지의 93 GB(`volumes/milvus/data`)가 그대로
+남아 있어 MinIO에서 다시 받을 필요가 없다. 로드 작업 자체는 0%부터 다시 시작한다.
+
 #### 로드 중 메모리는 로그가 아니라 프로세스에서 읽는다
 
 로드가 진행되면서 `memUsage`가 오르는 것을 보고 "이대로면 천장을 넘겠다"고 두 번 잘못

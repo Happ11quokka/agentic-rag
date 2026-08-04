@@ -62,8 +62,20 @@ cd "$ROOT" || exit 1
     echo
     echo "=== search latency on the loaded collection (baseline retrieval cost) ==="
 } >> "$OUT"
-caffeinate -ims uv run wikipedia-inspect --backend milvus \
-    --bundle-dir "$BUNDLE" --runs 10 --search-list 100 --load-timeout 3600 >> "$OUT" 2>&1
+# Retry once. The first attempt at this step died when Docker Desktop was
+# killed by host memory pressure -- the Docker VM and the BGE-M3 encoder did
+# not fit together on a 36 GB host. The VM is smaller now, but a transient
+# daemon failure should cost a retry rather than the whole night's load.
+for attempt in 1 2; do
+    caffeinate -ims uv run wikipedia-inspect --backend milvus \
+        --bundle-dir "$BUNDLE" --runs 10 --search-list 100 --load-timeout 3600 >> "$OUT" 2>&1
+    if grep -q "summary:" "$OUT"; then break; fi
+    echo "$(date '+%H:%M:%S') inspect attempt ${attempt} failed; waiting for milvus" >> "$OUT"
+    for _ in $(seq 1 60); do
+        curl -sf http://localhost:9091/healthz >/dev/null 2>&1 && break
+        sleep 10
+    done
+done
 
 # Match the decode gap to the retrieval it has to hide.
 #
