@@ -9,6 +9,7 @@ from typing import Any
 from agent.retrieval import TimedRetriever
 from agent.runner import AgentRunner, LlamaCppClient
 from wikipedia.encoder import Encoder
+from wikipedia.qdrant import QdrantVectorDB
 
 from .artifacts import RunArtifacts, run_metadata
 from .common import (
@@ -26,14 +27,17 @@ from .common import (
     format_metric,
     llama_server_binary,
     prepare_wikipedia,
+    print_histograms,
     print_table,
     prompt_positive_int,
     require_models,
+    require_restartable_qdrant,
+    restart_qdrant,
     select_benchmark_questions,
     summarize,
 )
 
-DESCRIPTION = "Measure generated tokens around Qdrant tool queries"
+DESCRIPTION = "Measure tool-use query tokens and latency"
 DEFAULT_TASKS = 5
 DEFAULT_REPETITIONS = 3
 REASONING_BUDGET_TOKENS = 512
@@ -71,6 +75,9 @@ def _new_role_result() -> dict[str, Any]:
         "incomplete_queries": [],
         "incomplete_first": [],
         "incomplete_between": [],
+        "end_to_end": [],
+        "incomplete_end_to_end": [],
+        "retrieval": {"encode": [], "qdrant": [], "total": []},
         "valid": 0,
         "failed": 0,
         "failure_statuses": {},
@@ -86,7 +93,20 @@ def _record_outcome(selected: dict[str, Any], outcome: dict[str, Any]) -> None:
     elif search_count == 1:
         selected["one_query"] += 1
 
-    if outcome["terminal_status"] in VALID_TERMINAL_STATUSES:
+    timing = outcome.get("timing") or {}
+    end_to_end = timing.get("end_to_end_ms")
+    valid = outcome["terminal_status"] in VALID_TERMINAL_STATUSES
+    if isinstance(end_to_end, (int, float)) and not isinstance(end_to_end, bool):
+        key = "end_to_end" if valid else "incomplete_end_to_end"
+        selected[key].append(float(end_to_end))
+    for retrieval in outcome.get("retrieval_calls") or []:
+        encode = float(retrieval["encode_duration_ms"])
+        qdrant = float(retrieval["qdrant_duration_ms"])
+        selected["retrieval"]["encode"].append(encode)
+        selected["retrieval"]["qdrant"].append(qdrant)
+        selected["retrieval"]["total"].append(encode + qdrant)
+
+    if valid:
         first, between = query_token_metrics(outcome)
         selected["valid"] += 1
         selected["queries"].append(float(search_count))
@@ -136,13 +156,62 @@ def _metric_rows(
 
 
 def render_report(results: dict[str, dict[str, Any]]) -> None:
-    print("\nTool-use experiment metrics (generated tokens only)")
+    print("\nTool-use latency metrics")
+    latency_rows: list[list[object]] = []
+    for role in ("main", "draft"):
+        values = results[role]
+        for label, selected in (
+            ("end-to-end (ms)", values["end_to_end"]),
+            ("encode (ms)", values["retrieval"]["encode"]),
+            ("Qdrant (ms)", values["retrieval"]["qdrant"]),
+            ("retrieval total (ms)", values["retrieval"]["total"]),
+        ):
+            stats = summarize(selected)
+            latency_rows.append(
+                [
+                    role,
+                    label,
+                    stats.count,
+                    format_metric(stats.mean),
+                    format_metric(stats.median),
+                    format_metric(stats.p95_worst),
+                ]
+            )
     headers = ("role", "metric", "n", "mean", "median", "p95-worst")
+    print_table(headers, latency_rows)
+    print_histograms(
+        "End-to-end latency histogram (ms; valid runs)",
+        {role: results[role]["end_to_end"] for role in ("main", "draft")},
+    )
+    print_histograms(
+        "Qdrant RPC latency histogram (ms; completed queries)",
+        {
+            role: results[role]["retrieval"]["qdrant"]
+            for role in ("main", "draft")
+        },
+    )
+
+    print("\nTool-use query metrics (generated tokens only)")
     print_table(headers, _metric_rows(results))
     print("p95-worst is numeric p95; lower is treated as better for query/token cost.")
 
-    print("\nIncomplete-run query metrics (diagnostic only)")
-    print_table(headers, _metric_rows(results, prefix="incomplete_"))
+    print("\nIncomplete-run metrics (diagnostic only)")
+    print_table(
+        headers,
+        [
+            [
+                role,
+                "end-to-end (ms)",
+                stats.count,
+                format_metric(stats.mean),
+                format_metric(stats.median),
+                format_metric(stats.p95_worst),
+            ]
+            for role in ("main", "draft")
+            for stats in [summarize(results[role]["incomplete_end_to_end"])]
+        ]
+        + _metric_rows(results, prefix="incomplete_"),
+    )
 
     print("\nRun outcomes")
     print_table(
@@ -177,17 +246,32 @@ def build_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
         result = results[role]
         summary["roles"][role] = {
             "valid_metrics": {
+                "end_to_end_ms": asdict(summarize(result["end_to_end"])),
                 "queries_per_run": asdict(summarize(result["queries"])),
                 "tokens_to_first_query": asdict(summarize(result["first"])),
                 "tokens_between_queries": asdict(summarize(result["between"])),
             },
             "incomplete_metrics": {
+                "end_to_end_ms": asdict(
+                    summarize(result["incomplete_end_to_end"])
+                ),
                 "queries_per_run": asdict(summarize(result["incomplete_queries"])),
                 "tokens_to_first_query": asdict(
                     summarize(result["incomplete_first"])
                 ),
                 "tokens_between_queries": asdict(
                     summarize(result["incomplete_between"])
+                ),
+            },
+            "retrieval_metrics": {
+                "encode_duration_ms": asdict(
+                    summarize(result["retrieval"]["encode"])
+                ),
+                "qdrant_duration_ms": asdict(
+                    summarize(result["retrieval"]["qdrant"])
+                ),
+                "total_duration_ms": asdict(
+                    summarize(result["retrieval"]["total"])
                 ),
             },
             "outcomes": {
@@ -209,19 +293,14 @@ def run(task_count: int, repetitions: int) -> None:
     results = {role: _new_role_result() for role in ("main", "draft")}
 
     with prepare_wikipedia(require_idle=True) as environment:
+        require_restartable_qdrant(environment)
         print(f"setup: loading BGE-M3 from {environment.paths.model_dir}", flush=True)
         try:
             encoder = Encoder(environment.paths.bundle_dir, require_complete=False)
+            print("setup: warming BGE-M3 encoder", flush=True)
+            encoder.encode(FIXED_RETRIEVAL_WARMUP)
         except Exception as exc:
             raise ExperimentError(f"BGE-M3 could not be loaded: {exc}") from exc
-        retriever = TimedRetriever(
-            encoder,
-            environment.database,
-            top_k=RETRIEVAL_TOP_K,
-            max_chars_per_result=RETRIEVAL_MAX_CHARS,
-        )
-        print("setup: warming retrieval", flush=True)
-        retriever.search(FIXED_RETRIEVAL_WARMUP)
 
         wiki_manifest = environment.manifest
         metadata = run_metadata(
@@ -240,6 +319,9 @@ def run(task_count: int, repetitions: int) -> None:
                 "retrieval": {
                     "top_k": RETRIEVAL_TOP_K,
                     "max_chars_per_result": RETRIEVAL_MAX_CHARS,
+                    "database_reset": "docker_restart_per_benchmark_unit",
+                    "host_page_cache_evicted": False,
+                    "reset_included_in_end_to_end": False,
                 },
                 "wikipedia": {
                     "collection": environment.database.config.collection_name,
@@ -280,16 +362,28 @@ def run(task_count: int, repetitions: int) -> None:
                             [{"role": "user", "content": FIXED_LLM_WARMUP}],
                             {**GENERATION, "max_tokens": 32, "temperature": 0},
                         )
-                        runner = AgentRunner(
-                            client,
-                            retriever,
-                            generation=GENERATION,
-                            max_searches=MAX_SEARCHES,
-                            question_timeout_seconds=QUESTION_TIMEOUT_SECONDS,
-                        )
                         for repetition in range(repetitions):
                             for question in questions:
-                                outcome = runner.run(question)
+                                restart_qdrant(environment)
+                                with QdrantVectorDB(
+                                    environment.database.config
+                                ) as database:
+                                    retriever = TimedRetriever(
+                                        encoder,
+                                        database,
+                                        top_k=RETRIEVAL_TOP_K,
+                                        max_chars_per_result=RETRIEVAL_MAX_CHARS,
+                                    )
+                                    runner = AgentRunner(
+                                        client,
+                                        retriever,
+                                        generation=GENERATION,
+                                        max_searches=MAX_SEARCHES,
+                                        question_timeout_seconds=(
+                                            QUESTION_TIMEOUT_SECONDS
+                                        ),
+                                    )
+                                    outcome = runner.run(question)
                                 artifacts.append(
                                     {
                                         "record_type": "agent_run",

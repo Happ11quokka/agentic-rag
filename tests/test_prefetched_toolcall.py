@@ -192,7 +192,9 @@ def test_pair_retrievals_measures_readiness_exact_match_and_overlap() -> None:
     ]
 
 
-def test_record_result_separates_role_latencies_and_coverage() -> None:
+def test_record_result_separates_role_latencies_and_coverage(
+    capsys: Any,
+) -> None:
     target_retrieval = retrieval(
         "same", qdrant_start_ns=30_000_000, qdrant_end_ns=40_000_000
     )
@@ -230,6 +232,12 @@ def test_record_result_separates_role_latencies_and_coverage() -> None:
     assert metrics["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"] == 1
     assert metrics["prefetch"]["coverage_rate"] == 1
     assert metrics["prefetch"]["exact_warm_ready_rate"] == 1
+
+    prefetched_toolcall.render_report(results)
+    output = capsys.readouterr().out
+    assert "End-to-end latency histogram" in output
+    assert "Qdrant RPC latency histogram" in output
+    assert "#" in output
 
 
 def test_run_benchmark_syncs_after_target_retrieval() -> None:

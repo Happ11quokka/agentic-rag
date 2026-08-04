@@ -22,9 +22,11 @@ phases, synchronized draft-query prefetch, and a Qdrant-only storage benchmark. 
 for task/query and repetition counts, prints progress and final metrics, and writes
 manifests, JSONL traces, and summaries under `experiment/results/`.
 
-Tool-use reuses the Wikipedia bundle selected by `WIKIPEDIA_BUNDLE_DIR` or
-`.wikipedia.local.toml`, starts/reuses Qdrant, loads BGE-M3 once, and runs main and draft
-model phases sequentially. The parallel experiment starts both model servers together and
-does not require Qdrant. Prefetched tool calls use both servers and shared Qdrant, with the
-main model as target and one draft query per synchronized target transcript. SSE timing
-remains client-observed rather than a claimed GPU-token timestamp.
+Tool-use uses the Wikipedia bundle selected by `WIKIPEDIA_BUNDLE_DIR` or
+`.wikipedia.local.toml`, loads BGE-M3 once, and runs main and draft phases sequentially.
+It restarts local Docker Qdrant before every role/question/repetition unit. Prefetched
+tool calls similarly restart Qdrant before every paired run, then let target and draft
+share only that fresh backend. Restart time is excluded from end-to-end latency; host OS
+page cache is not evicted. Both experiments print horizontal ASCII histograms for
+end-to-end and Qdrant RPC latency. The parallel experiment does not require Qdrant. SSE
+timing remains client-observed rather than a claimed GPU-token timestamp.

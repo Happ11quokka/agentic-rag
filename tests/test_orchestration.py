@@ -29,6 +29,36 @@ def test_statistics_and_formatting() -> None:
     assert format_metric(None) == "n/a"
 
 
+def test_histograms_share_bins_across_series(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    common.print_histograms(
+        "Latency histogram (ms)",
+        {"main": [0.0, 2.0], "draft": [1.0, 3.0]},
+        max_bins=2,
+        bar_width=4,
+    )
+
+    output = capsys.readouterr().out
+    assert "Latency histogram (ms)" in output
+    assert output.count("[0.00, 1.50)") == 2
+    assert output.count("[1.50, 3.00]") == 2
+    assert "main (n=2)" in output
+    assert "draft (n=2)" in output
+
+
+def test_histograms_handle_constant_and_empty_samples(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    common.print_histograms("Constant", {"one": [5.0], "empty": []})
+    common.print_histograms("Empty", {"empty": []})
+
+    output = capsys.readouterr().out
+    assert "5.00" in output
+    assert "one (n=1)" in output
+    assert output.count("no samples") == 2
+
+
 def test_progress_prints_first_and_final_for_non_tty() -> None:
     stream = io.StringIO()
     ticks = iter([0.0, 1.0, 2.0])
@@ -150,6 +180,75 @@ def test_prepare_wikipedia_rejects_active_ingestion_and_closes_database(
         common.prepare_wikipedia(stability_seconds=0)
 
     assert closed.value is True
+
+
+def test_restart_qdrant_restarts_configured_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    environment = SimpleNamespace(
+        database=SimpleNamespace(
+            config=SimpleNamespace(
+                url=common.DEFAULT_QDRANT_URL,
+                collection_name="wikipedia",
+            )
+        ),
+        manifest={"qdrant": {"container": "test-qdrant"}},
+    )
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        lambda arguments, **kwargs: calls.append(arguments)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        common.httpx,
+        "get",
+        lambda url, **kwargs: calls.append(url) or SimpleNamespace(status_code=200),
+    )
+
+    common.restart_qdrant(environment)
+
+    assert calls == [
+        ["docker", "restart", "test-qdrant"],
+        f"{common.DEFAULT_QDRANT_URL}/collections/wikipedia",
+    ]
+
+
+def test_restart_qdrant_rejects_remote_endpoint() -> None:
+    environment = SimpleNamespace(
+        database=SimpleNamespace(
+            config=SimpleNamespace(url="https://example.test", collection_name="wiki")
+        ),
+        manifest={},
+    )
+
+    with pytest.raises(ExperimentError, match="local Docker Qdrant"):
+        common.restart_qdrant(environment)
+
+
+def test_restart_qdrant_reports_docker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = SimpleNamespace(
+        database=SimpleNamespace(
+            config=SimpleNamespace(
+                url=common.DEFAULT_QDRANT_URL,
+                collection_name="wiki",
+            )
+        ),
+        manifest={},
+    )
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="restart failed"
+        ),
+    )
+
+    with pytest.raises(ExperimentError, match="restart failed"):
+        common.restart_qdrant(environment)
 
 
 def test_paired_completion_really_runs_clients_concurrently() -> None:
@@ -299,6 +398,10 @@ def test_tooluse_records_failed_run_metrics_and_status() -> None:
         "terminal_status": "timeout",
         "search_count": 2,
         "llm_calls": [_call(12, "one"), _call(8, "two")],
+        "timing": {"end_to_end_ms": 50.0},
+        "retrieval_calls": [
+            {"encode_duration_ms": 2.0, "qdrant_duration_ms": 3.0}
+        ],
     }
 
     tooluse._record_outcome(selected, outcome)
@@ -309,6 +412,12 @@ def test_tooluse_records_failed_run_metrics_and_status() -> None:
     assert selected["incomplete_queries"] == [2.0]
     assert selected["incomplete_first"] == [12.0]
     assert selected["incomplete_between"] == [8.0]
+    assert selected["incomplete_end_to_end"] == [50.0]
+    assert selected["retrieval"] == {
+        "encode": [2.0],
+        "qdrant": [3.0],
+        "total": [5.0],
+    }
 
 
 def test_tooluse_failed_run_survives_missing_token_usage() -> None:
@@ -358,8 +467,10 @@ def test_tooluse_report_shows_incomplete_metrics_and_failure_status(
     tooluse.render_report(results)
 
     output = capsys.readouterr().out
-    assert "Incomplete-run query metrics" in output
+    assert "Incomplete-run metrics" in output
     assert "Failure status breakdown" in output
+    assert "End-to-end latency histogram" in output
+    assert "Qdrant RPC latency histogram" in output
     rows = [line.split() for line in output.splitlines()]
     assert ["main", "timeout", "1"] in rows
     assert ["draft", "none", "0"] in rows

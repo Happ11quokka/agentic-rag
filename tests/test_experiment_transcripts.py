@@ -134,7 +134,9 @@ def test_tooluse_persists_model_turns_queries_and_results(
         paths=SimpleNamespace(model_dir=tmp_path / "model", bundle_dir=tmp_path),
         database=SimpleNamespace(
             config=SimpleNamespace(
-                collection_name="wikipedia", endpoint="http://qdrant"
+                collection_name="wikipedia",
+                endpoint="http://localhost:6333",
+                url="http://localhost:6333",
             )
         ),
         manifest={
@@ -217,21 +219,51 @@ def test_tooluse_persists_model_turns_queries_and_results(
             }
 
     monkeypatch.setattr(tooluse, "prepare_wikipedia", wikipedia_environment)
-    monkeypatch.setattr(tooluse, "Encoder", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        tooluse,
+        "Encoder",
+        lambda *args, **kwargs: SimpleNamespace(encode=lambda query: [0.0]),
+    )
     monkeypatch.setattr(tooluse, "TimedRetriever", FakeRetriever)
     monkeypatch.setattr(tooluse, "AgentRunner", FakeAgentRunner)
+    restarts: list[object] = []
+    databases: list[object] = []
+
+    @contextmanager
+    def fresh_database(config):
+        database = SimpleNamespace(config=config)
+        databases.append(database)
+        yield database
+
+    monkeypatch.setattr(
+        tooluse, "restart_qdrant", lambda selected: restarts.append(selected)
+    )
+    monkeypatch.setattr(tooluse, "QdrantVectorDB", fresh_database)
 
     tooluse.run(1, 1)
 
     manifest, rows, summary = _run_rows(tmp_path, "tooluse")
     assert manifest["record_count"] == 2
     assert manifest["parameters"]["wikipedia"]["points_count"] == 123
+    assert (
+        manifest["parameters"]["retrieval"]["database_reset"]
+        == "docker_restart_per_benchmark_unit"
+    )
     assert {row["model_role"] for row in rows} == {"main", "draft"}
     outcome = rows[0]["outcome"]
     assert outcome["llm_calls"][0]["reasoning"] == "find evidence"
     assert outcome["retrieval_calls"][0]["query"].startswith("query-")
     assert outcome["retrieval_calls"][0]["results"][0]["snippet"] == "evidence"
     assert summary["roles"]["main"]["valid_metrics"]["queries_per_run"]["count"] == 1
+    assert summary["roles"]["main"]["valid_metrics"]["end_to_end_ms"]["mean"] == 10
+    assert (
+        summary["roles"]["main"]["retrieval_metrics"]["qdrant_duration_ms"][
+            "mean"
+        ]
+        == 2
+    )
+    assert len(restarts) == 2
+    assert len(databases) == 2
 
 
 def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
@@ -243,7 +275,9 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
         paths=SimpleNamespace(model_dir=tmp_path / "model", bundle_dir=tmp_path),
         database=SimpleNamespace(
             config=SimpleNamespace(
-                collection_name="wikipedia", endpoint="http://qdrant"
+                collection_name="wikipedia",
+                endpoint="http://localhost:6333",
+                url="http://localhost:6333",
             )
         ),
         manifest={"dataset": {}, "model": {}},
@@ -363,16 +397,34 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
     monkeypatch.setattr(prefetched_toolcall, "LlamaCppClient", Client)
     monkeypatch.setattr(prefetched_toolcall, "prepare_wikipedia", wikipedia_environment)
     monkeypatch.setattr(
-        prefetched_toolcall, "Encoder", lambda *args, **kwargs: object()
+        prefetched_toolcall,
+        "Encoder",
+        lambda *args, **kwargs: SimpleNamespace(encode=lambda query: [0.0]),
     )
     monkeypatch.setattr(prefetched_toolcall, "TimedRetriever", Retriever)
     monkeypatch.setattr(prefetched_toolcall, "render_report", lambda *args: None)
+    restarts: list[object] = []
+    databases: list[object] = []
+
+    @contextmanager
+    def fresh_database(config):
+        database = SimpleNamespace(config=config)
+        databases.append(database)
+        yield database
+
+    monkeypatch.setattr(
+        prefetched_toolcall,
+        "restart_qdrant",
+        lambda selected: restarts.append(selected),
+    )
+    monkeypatch.setattr(prefetched_toolcall, "QdrantVectorDB", fresh_database)
 
     prefetched_toolcall.run(1, 1)
 
     manifest, rows, summary = _run_rows(tmp_path, "prefetched-toolcall")
     assert manifest["status"] == "completed"
     assert manifest["parameters"]["target_model_role"] == "main"
+    assert manifest["parameters"]["retrieval"]["reset_included_in_end_to_end"] is False
     assert len(rows) == 1
     assert rows[0]["target_outcome"]["terminal_status"] == "final"
     assert rows[0]["sync_events"][1]["source"] == "target_retrieval"
@@ -383,3 +435,5 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
         summary["metrics"]["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"]
         == 1
     )
+    assert len(restarts) == 1
+    assert len(databases) == 1

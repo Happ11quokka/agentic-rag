@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
-
-import httpx
 
 from wikipedia.encoder import Encoder
 from wikipedia.qdrant import QdrantVectorDB
@@ -19,6 +16,7 @@ from .common import (
     prepare_wikipedia,
     print_table,
     prompt_positive_int,
+    restart_qdrant,
     select_benchmark_questions,
     summarize,
 )
@@ -27,37 +25,6 @@ DESCRIPTION = "Measure Qdrant cache hit and non-hit retrieval latency"
 DEFAULT_QUERIES = 20
 DEFAULT_REPETITIONS = 10
 TOP_K = 5
-
-
-def restart_qdrant(environment: WikipediaEnvironment, collection: str) -> None:
-    saved = environment.manifest.get("qdrant", {})
-    url = environment.database.config.url or ""
-    if url.rstrip("/") != DEFAULT_QDRANT_URL:
-        raise ExperimentError(
-            "vectordb non-hit measurement requires the local Docker Qdrant endpoint "
-            f"{DEFAULT_QDRANT_URL}; configured endpoint is {url}"
-        )
-    container = str(saved.get("container", "wikipedia-qdrant"))
-    result = subprocess.run(
-        ["docker", "restart", container], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise ExperimentError(
-            f"could not restart Qdrant container {container}: {detail}"
-        )
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        try:
-            response = httpx.get(f"{url}/collections/{collection}", timeout=1)
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError:
-            pass
-        time.sleep(1)
-    raise ExperimentError(
-        "Qdrant did not become ready within 120 seconds after restart"
-    )
 
 
 def query_latency_ms(

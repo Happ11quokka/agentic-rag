@@ -22,6 +22,7 @@ from agent.runner import (
     prompt_hash,
 )
 from wikipedia.encoder import Encoder
+from wikipedia.qdrant import QdrantVectorDB
 
 from .artifacts import RunArtifacts, run_metadata
 from .common import (
@@ -41,9 +42,12 @@ from .common import (
     format_metric,
     llama_server_binary,
     prepare_wikipedia,
+    print_histograms,
     print_table,
     prompt_positive_int,
     require_models,
+    require_restartable_qdrant,
+    restart_qdrant,
     select_benchmark_questions,
     summarize,
 )
@@ -56,7 +60,7 @@ from .tooluse import (
     VALID_TERMINAL_STATUSES,
 )
 
-DESCRIPTION = "Use a synchronized draft model to prefetch Qdrant tool queries"
+DESCRIPTION = "Measure synchronized draft query prefetch latency"
 
 
 def _draft_generation(generation: dict[str, Any]) -> dict[str, Any]:
@@ -596,6 +600,17 @@ def render_report(results: dict[str, Any]) -> None:
             ]
         ],
     )
+    print_histograms(
+        "End-to-end latency histogram (ms; valid target runs)",
+        {"target": results["target_e2e"]},
+    )
+
+    incomplete_e2e = metrics["incomplete_target_end_to_end_ms"]
+    print("\nIncomplete target latency (diagnostic only)")
+    print_table(
+        ("metric", "n", "mean", "median", "p95-worst"),
+        [_summary_row("end-to-end (ms)", incomplete_e2e)],
+    )
 
     print("\nObserved retrieval latency")
     rows: list[list[object]] = []
@@ -617,6 +632,13 @@ def render_report(results: dict[str, Any]) -> None:
                 ]
             )
     print_table(("role", "metric", "n", "mean", "median", "p95-worst"), rows)
+    print_histograms(
+        "Qdrant RPC latency histogram (ms; completed queries)",
+        {
+            role: results["retrieval"][role]["qdrant"]
+            for role in ("target", "draft")
+        },
+    )
 
     print("\nConcurrent LLM diagnostics")
     rows = []
@@ -715,19 +737,14 @@ def run(task_count: int, repetitions: int) -> None:
     results = _new_results()
 
     with prepare_wikipedia(require_idle=True) as environment:
+        require_restartable_qdrant(environment)
         print(f"setup: loading BGE-M3 from {environment.paths.model_dir}", flush=True)
         try:
             encoder = Encoder(environment.paths.bundle_dir, require_complete=False)
+            print("setup: warming BGE-M3 encoder", flush=True)
+            encoder.encode(FIXED_RETRIEVAL_WARMUP)
         except Exception as exc:
             raise ExperimentError(f"BGE-M3 could not be loaded: {exc}") from exc
-        retriever = TimedRetriever(
-            encoder,
-            environment.database,
-            top_k=RETRIEVAL_TOP_K,
-            max_chars_per_result=RETRIEVAL_MAX_CHARS,
-        )
-        print("setup: warming retrieval", flush=True)
-        retriever.search(FIXED_RETRIEVAL_WARMUP)
 
         wiki_manifest = environment.manifest
         metadata = run_metadata(
@@ -749,6 +766,9 @@ def run(task_count: int, repetitions: int) -> None:
                 "retrieval": {
                     "top_k": RETRIEVAL_TOP_K,
                     "max_chars_per_result": RETRIEVAL_MAX_CHARS,
+                    "database_reset": "docker_restart_per_benchmark_unit",
+                    "host_page_cache_evicted": False,
+                    "reset_included_in_end_to_end": False,
                 },
                 "wikipedia": {
                     "collection": environment.database.config.collection_name,
@@ -809,13 +829,23 @@ def run(task_count: int, repetitions: int) -> None:
                 completed = 0
                 for repetition in range(repetitions):
                     for question in questions:
-                        paired = run_benchmark(
-                            question,
-                            clients["main"],
-                            clients["draft"],
-                            retriever,
-                            retriever,
-                        )
+                        restart_qdrant(environment)
+                        with QdrantVectorDB(
+                            environment.database.config
+                        ) as database:
+                            retriever = TimedRetriever(
+                                encoder,
+                                database,
+                                top_k=RETRIEVAL_TOP_K,
+                                max_chars_per_result=RETRIEVAL_MAX_CHARS,
+                            )
+                            paired = run_benchmark(
+                                question,
+                                clients["main"],
+                                clients["draft"],
+                                retriever,
+                                retriever,
+                            )
                         record_result(results, paired)
                         artifacts.append(
                             {

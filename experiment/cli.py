@@ -24,10 +24,12 @@ EXPERIMENTS = (
         "isolated main/draft inference",
         independent_run.prompt_and_run,
     ),
-    Experiment("tooluse", "separate model tool-use behavior", tooluse.prompt_and_run),
+    Experiment(
+        "tooluse", "tool-use query tokens and latency", tooluse.prompt_and_run
+    ),
     Experiment(
         "prefetched-toolcall",
-        "synchronized draft query prefetch",
+        "synchronized draft query prefetch latency",
         prefetched_toolcall.prompt_and_run,
     ),
     Experiment(

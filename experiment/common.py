@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,6 +149,75 @@ def print_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> Non
     print(line(["-" * width for width in widths]))
     for row in values[1:]:
         print(line(row))
+
+
+def print_histograms(
+    title: str,
+    series: Mapping[str, Sequence[float]],
+    *,
+    max_bins: int = 10,
+    bar_width: int = 32,
+) -> None:
+    """Print comparable horizontal histograms using shared equal-width bins."""
+    if max_bins < 1:
+        raise ValueError("max_bins must be at least 1")
+    if bar_width < 1:
+        raise ValueError("bar_width must be at least 1")
+
+    selected = {
+        label: [float(value) for value in values] for label, values in series.items()
+    }
+    pooled = [value for values in selected.values() for value in values]
+    print(f"\n{title}")
+    if not pooled:
+        print("no samples")
+        return
+
+    minimum = min(pooled)
+    maximum = max(pooled)
+    bin_count = min(max_bins, max(1, math.ceil(math.sqrt(len(pooled)))))
+    if minimum == maximum:
+        bin_count = 1
+        width = 0.0
+    else:
+        width = (maximum - minimum) / bin_count
+
+    counts: dict[str, list[int]] = {}
+    for label, values in selected.items():
+        bins = [0] * bin_count
+        for value in values:
+            index = (
+                0
+                if width == 0
+                else min(bin_count - 1, int((value - minimum) / width))
+            )
+            bins[index] += 1
+        counts[label] = bins
+    largest = max(count for bins in counts.values() for count in bins)
+
+    labels: list[str] = []
+    for index in range(bin_count):
+        if width == 0:
+            labels.append(f"{minimum:.2f}")
+            continue
+        lower = minimum + index * width
+        upper = maximum if index == bin_count - 1 else lower + width
+        closing = "]" if index == bin_count - 1 else ")"
+        labels.append(f"[{lower:.2f}, {upper:.2f}{closing}")
+    label_width = max(len(label) for label in labels)
+
+    for name, values in selected.items():
+        print(f"{name} (n={len(values)})")
+        if not values:
+            print("  no samples")
+            continue
+        for label, count in zip(labels, counts[name], strict=True):
+            length = 0 if count == 0 else max(1, round(count / largest * bar_width))
+            percentage = count / len(values) * 100
+            print(
+                f"  {label.ljust(label_width)} | "
+                f"{('#' * length).ljust(bar_width)} {count:>4} ({percentage:5.1f}%)"
+            )
 
 
 class Progress:
@@ -459,6 +528,47 @@ class WikipediaEnvironment(AbstractContextManager["WikipediaEnvironment"]):
 
     def __exit__(self, *args: object) -> None:
         self.database.close()
+
+
+def require_restartable_qdrant(environment: WikipediaEnvironment) -> None:
+    url = environment.database.config.url or ""
+    if url.rstrip("/") != DEFAULT_QDRANT_URL:
+        raise ExperimentError(
+            "fresh per-run vector database state requires the local Docker Qdrant "
+            f"endpoint {DEFAULT_QDRANT_URL}; configured endpoint is {url}"
+        )
+
+
+def restart_qdrant(
+    environment: WikipediaEnvironment, collection: str | None = None
+) -> None:
+    require_restartable_qdrant(environment)
+    selected_collection = collection or environment.database.config.collection_name
+    saved = environment.manifest.get("qdrant", {})
+    container = str(saved.get("container", "wikipedia-qdrant"))
+    result = subprocess.run(
+        ["docker", "restart", container], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise ExperimentError(
+            f"could not restart Qdrant container {container}: {detail}"
+        )
+    url = (environment.database.config.url or "").rstrip("/")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.get(
+                f"{url}/collections/{selected_collection}", timeout=1
+            )
+            if response.status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(1)
+    raise ExperimentError(
+        "Qdrant did not become ready within 120 seconds after restart"
+    )
 
 
 def _local_ingestion_processes() -> list[str]:
