@@ -504,6 +504,40 @@ release collection due to ref count to 0
 
 → **`QUERYCOORD_SEGMENTTASKTIMEOUT=3600000`, `QUERYCOORD_CHANNELTASKTIMEOUT=600000`.**
 
+#### 튜닝은 재시작 없이 — etcd 런타임 설정
+
+`taskExecutionCap`을 4에서 올려 보고 싶은데, compose 환경변수를 고치면 컨테이너를
+재시작해야 하고 그러면 **이미 받아 둔 로컬 파일이 정리되면서 진행분이 날아간다.**
+`queryCoord.taskExecutionCap`은 `refreshable:"true"`이므로 etcd로 런타임에 바꿀 수 있다.
+
+```bash
+docker exec wikipedia-milvus-etcd etcdctl put "by-dev/config/queryCoord.taskExecutionCap" "16"
+```
+
+Milvus가 즉시 받는다(`config/manager.go:410 "receive update event"`). 적용 여부는
+로그의 `committedMemSize`로 확인한다 — cap × 약 130 MB에 붙는다.
+
+```
+cap=4  → committedMemSize ≈   515 MB
+cap=16 → committedMemSize ≈ 2,164 MB
+```
+
+**다만 효과는 제한적이었다.** 동시성을 4배로 올렸는데 진행률은 약 1.3배밖에 안 빨라졌다
+(0.14 → 0.3 %/분). 세그먼트 하나의 인덱스 로드가 `appendLoadIndexInfoSpan≈2분`인데,
+이건 대기가 아니라 **한 스핀들에서 MinIO 읽기와 로컬 쓰기가 뒤섞이는 비용**이다. 즉 이
+단계는 동시성이 아니라 디스크에 묶여 있다. 총 이관량은 약 134 GB다.
+
+> 되돌릴 때는 같은 키를 지운다: `etcdctl del "by-dev/config/queryCoord.taskExecutionCap"`.
+> compose의 값이 다시 기본이 되므로, **오래 갈 설정은 반드시 템플릿에도 넣어야 한다.**
+
+#### 잠복 — 디스크 가드는 엉뚱한 파일시스템을 본다
+
+아직 안 터졌지만 기록해 둔다. 컨테이너 안에서 `df /var/lib/milvus`는 macOS 부트 볼륨
+(461 G, 여유 49 G)을 보고한다. 실제 바인드는 `/dev/disk7s2`(여유 1.3 TiB)인데
+`/run/host_mark/Volumes` 때문에 잘못 잡힌다. 지금은 `predictDiskUsage`가 작아 문제가
+없지만, 규모가 커지면 **여유가 충분한데도 디스크 부족으로 거부**당할 수 있다.
+그때는 `QUERYNODE_DISKCAPACITYLIMIT`로 직접 못박는다.
+
 #### 기각 — 페이지 캐시 드롭
 
 한동안 "Milvus가 페이지 캐시를 사용 메모리로 세니 로드 중에 주기적으로 캐시를 비우면

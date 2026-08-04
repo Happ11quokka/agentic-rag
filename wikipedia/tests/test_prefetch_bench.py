@@ -1,5 +1,26 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 from fakes import FakeDatabase, FakeEncoder
+
+from wikipedia import prefetch_bench
+
+
+class _CtxDatabase:
+    """Wraps a fake database so `with database:` works like MilvusVectorDB."""
+
+    def __init__(self, inner: FakeDatabase) -> None:
+        self._inner = inner
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    def search(self, vector, *, limit: int = 10):
+        return self._inner.search(vector, limit=limit)
 
 from wikipedia.prefetch import ReplayPredictor
 from wikipedia.prefetch_bench import (
@@ -154,3 +175,49 @@ def test_report_states_the_simulated_decode_gap_it_depended_on() -> None:
 def test_select_episodes_refuses_to_recycle_an_episode() -> None:
     with pytest.raises(ValueError):
         select_episodes(len(DEFAULT_EPISODES) + 1)
+
+
+def test_main_runs_both_arms_and_writes_the_report_and_json(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """End-to-end through main(), so a CLI-only bug cannot survive a long load."""
+    database = FakeDatabase()
+    monkeypatch.setattr(prefetch_bench.BundlePaths, "resolve", classmethod(lambda cls, d=None: SimpleNamespace(bundle_dir=tmp_path)))
+    monkeypatch.setattr(
+        prefetch_bench,
+        "inspect_bundle",
+        lambda bundle_dir, **kw: SimpleNamespace(paths=SimpleNamespace(bundle_dir=tmp_path)),
+    )
+    monkeypatch.setattr(prefetch_bench, "open_milvus", lambda summary, **kw: _CtxDatabase(database))
+    monkeypatch.setattr(prefetch_bench, "Encoder", lambda *a, **k: FakeEncoder())
+
+    payload = tmp_path / "out.json"
+    prefetch_bench.main(
+        [
+            "--episodes", "2",
+            "--limit", "2",
+            "--decode-seconds", "0",
+            "--json", str(payload),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "hit rate:" in out
+    assert "DIVERGENCE" not in out
+    assert "decode gap:" in out
+    written = json.loads(payload.read_text(encoding="utf-8"))
+    assert len(written) == 2
+    assert all(episode["identical"] for episode in written)
+    assert written[0]["baseline"] and written[0]["prefetch"]
+
+
+def test_main_refuses_to_recycle_episodes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(prefetch_bench.BundlePaths, "resolve", classmethod(lambda cls, d=None: SimpleNamespace(bundle_dir=tmp_path)))
+    monkeypatch.setattr(
+        prefetch_bench,
+        "inspect_bundle",
+        lambda bundle_dir, **kw: SimpleNamespace(paths=SimpleNamespace(bundle_dir=tmp_path)),
+    )
+
+    with pytest.raises(SystemExit):
+        prefetch_bench.main(["--episodes", str(len(DEFAULT_EPISODES) + 1)])
