@@ -106,26 +106,90 @@ def test_inspect_bundle_accepts_incomplete_manifest_and_counts_checkpoint(
     assert summary.model_bytes == 5
 
 
-def test_benchmark_query_runs_ten_times_and_reports_empty_results() -> None:
+def test_benchmark_query_times_one_run_per_distinct_query() -> None:
     database = FakeDatabase()
+    encoder = FakeEncoder()
     ticks = iter(value / 1000 for value in range(0, 200, 10))
 
     latencies, results = inspect.benchmark_query(
         database,
-        FakeEncoder(),
-        "aurora",
-        runs=10,
+        encoder,
+        ["aurora", "photosynthesis", "plate tectonics"],
         limit=5,
         timer=lambda: next(ticks),
     )
 
-    assert database.search_count == 10
-    assert latencies == pytest.approx([10.0] * 10)
+    assert encoder.queries == ["aurora", "photosynthesis", "plate tectonics"]
+    assert database.search_count == 3
+    assert latencies == pytest.approx([10.0] * 3)
     assert results[0].title == "Aurora"
 
+
+def test_benchmark_query_rejects_a_repeated_query() -> None:
+    with pytest.raises(ValueError, match="distinct"):
+        inspect.benchmark_query(
+            FakeDatabase(), FakeEncoder(), ["aurora", "aurora"], limit=5
+        )
+
+
+def test_benchmark_query_reports_empty_results() -> None:
+    database = FakeDatabase()
     database.search = lambda vector, limit: []  # type: ignore[method-assign]
+
     with pytest.raises(RuntimeError, match="returned no chunks"):
-        inspect.benchmark_query(database, FakeEncoder(), "missing", runs=1, limit=5)
+        inspect.benchmark_query(database, FakeEncoder(), ["missing"], limit=5)
+
+
+def test_select_queries_takes_one_query_per_run_from_the_pool() -> None:
+    assert inspect.select_queries(3, None) == list(inspect.DEFAULT_QUERIES[:3])
+    assert inspect.select_queries(2, ["a", "b", "c"]) == ["a", "b"]
+
+
+def test_select_queries_refuses_more_runs_than_available_queries() -> None:
+    with pytest.raises(ValueError, match="only 2 are available"):
+        inspect.select_queries(3, ["a", "b"])
+
+
+def test_select_queries_refuses_a_repeated_query() -> None:
+    with pytest.raises(ValueError, match="distinct"):
+        inspect.select_queries(2, ["a", "a"])
+
+
+def test_main_exits_when_runs_exceeds_available_queries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = FakeDatabase()
+    monkeypatch.setattr(
+        inspect.BundlePaths,
+        "resolve",
+        classmethod(lambda cls, bundle_dir=None: BundlePaths.from_dir(tmp_path)),
+    )
+    monkeypatch.setattr(
+        inspect, "inspect_bundle", lambda bundle_dir, **kwargs: _summary(tmp_path)
+    )
+    monkeypatch.setattr(
+        inspect, "ensure_qdrant", lambda url, **kwargs: "already running"
+    )
+    monkeypatch.setattr(inspect, "QdrantVectorDB", lambda config: database)
+    monkeypatch.setattr(
+        inspect,
+        "Encoder",
+        lambda *args, **kwargs: pytest.fail("encoder should not load for a bad query set"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        inspect.main(["--runs", "2", "--query", "only one"])
+
+    assert error.value.code == 2
+    assert "only 1 are available" in capsys.readouterr().err
+    assert database.search_count == 0
+
+
+def test_default_query_pool_has_enough_distinct_queries_for_default_runs() -> None:
+    default_runs = inspect.build_parser().get_default("runs")
+
+    assert len(set(inspect.DEFAULT_QUERIES)) == len(inspect.DEFAULT_QUERIES)
+    assert len(inspect.DEFAULT_QUERIES) >= default_runs
 
 
 def test_main_prints_bundle_database_latency_and_chunks(
@@ -155,9 +219,11 @@ def test_main_prints_bundle_database_latency_and_chunks(
 
     output = capsys.readouterr().out
     assert database.search_count == 10
-    assert encoder.queries == [inspect.DEFAULT_QUERY] * 10
+    assert encoder.queries == list(inspect.DEFAULT_QUERIES[:10])
+    assert len(set(encoder.queries)) == 10
     assert "471/471 shards ingested" in output
     assert "points=47018430" in output
+    assert "queries: 10 distinct" in output
     assert "summary: runs=10" in output
     assert "title=Aurora" in output
 
@@ -344,3 +410,136 @@ def test_main_rejects_missing_collection(
 
     assert error.value.code == 2
     assert "collection does not exist" in capsys.readouterr().err
+
+
+class FakeMilvusDatabase:
+    """Stands in for MilvusVectorDB, recording the config it was built with."""
+
+    def __init__(self, config: object) -> None:
+        self.config = config
+        self.client = self
+        self.load_calls = 0
+
+    def has_collection(self, collection: str, timeout: float | None = None) -> bool:
+        return True
+
+    def index_state(self) -> dict[str, object]:
+        return {
+            "index_type": "DISKANN",
+            "state": "Finished",
+            "total_rows": 10_000_000,
+            "indexed_rows": 10_000_000,
+            "pending_rows": 8_782_000,
+            "reason": "",
+        }
+
+    def load(self) -> None:
+        self.load_calls += 1
+
+
+def _milvus_summary(tmp_path: Path, **milvus: object) -> inspect.BundleSummary:
+    summary = _summary(tmp_path)
+    return inspect.BundleSummary(
+        paths=summary.paths,
+        complete=summary.complete,
+        shard_count=summary.shard_count,
+        completed_shards=summary.completed_shards,
+        dataset_bytes=summary.dataset_bytes,
+        model_bytes=summary.model_bytes,
+        qdrant=None,
+        milvus={"storage_dir": str(tmp_path / "milvus"), **milvus},
+    )
+
+
+def _open_milvus_with(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    **milvus: object,
+) -> FakeMilvusDatabase:
+    opened: list[FakeMilvusDatabase] = []
+
+    def build(config: object) -> FakeMilvusDatabase:
+        database = FakeMilvusDatabase(config)
+        opened.append(database)
+        return database
+
+    monkeypatch.setattr(inspect, "ensure_milvus", lambda uri, **kwargs: "already running")
+    monkeypatch.setattr(inspect, "MilvusVectorDB", build)
+    args = inspect.build_parser().parse_args(argv)
+    inspect._open_milvus(args, _milvus_summary(tmp_path, **milvus))
+    return opened[0]
+
+
+def test_open_milvus_defaults_load_timeout_to_the_config_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _open_milvus_with(tmp_path, monkeypatch, ["--backend", "milvus"])
+
+    assert database.config.load_timeout == inspect.DEFAULT_LOAD_TIMEOUT
+    assert database.load_calls == 1
+
+
+def test_open_milvus_load_timeout_flag_overrides_the_bundle_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _open_milvus_with(
+        tmp_path,
+        monkeypatch,
+        ["--backend", "milvus", "--load-timeout", "36000"],
+        load_timeout=1800.0,
+    )
+
+    assert database.config.load_timeout == 36000.0
+
+
+def test_open_milvus_reads_load_timeout_from_the_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _open_milvus_with(
+        tmp_path, monkeypatch, ["--backend", "milvus"], load_timeout=7200.0
+    )
+
+    assert database.config.load_timeout == 7200.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_load_timeout_rejects_non_positive_budgets(value: str) -> None:
+    with pytest.raises(SystemExit):
+        inspect.build_parser().parse_args(["--load-timeout", value])
+
+
+def test_open_milvus_keeps_etcd_where_the_bundle_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def ensure(uri: str, **kwargs: object) -> str:
+        seen.update(kwargs)
+        return "already running"
+
+    monkeypatch.setattr(inspect, "ensure_milvus", ensure)
+    monkeypatch.setattr(inspect, "MilvusVectorDB", FakeMilvusDatabase)
+    args = inspect.build_parser().parse_args(["--backend", "milvus"])
+    inspect._open_milvus(
+        args, _milvus_summary(tmp_path, etcd_dir="/fast/etcd")
+    )
+
+    assert seen["etcd_dir"] == "/fast/etcd"
+
+
+def test_open_milvus_leaves_etcd_alone_when_the_bundle_does_not_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def ensure(uri: str, **kwargs: object) -> str:
+        seen.update(kwargs)
+        return "already running"
+
+    monkeypatch.setattr(inspect, "ensure_milvus", ensure)
+    monkeypatch.setattr(inspect, "MilvusVectorDB", FakeMilvusDatabase)
+    args = inspect.build_parser().parse_args(["--backend", "milvus"])
+    inspect._open_milvus(args, _milvus_summary(tmp_path))
+
+    assert seen["etcd_dir"] is None

@@ -219,33 +219,115 @@ pytest repro/tests/                      # measurement·sweep 단위 + integrati
 ## 10. Upstash Wikipedia vector DB workspace
 
 Root project is a uv workspace for loading Upstash's English Wikipedia BGE-M3
-embeddings into Qdrant or Milvus. Existing `repro/` project remains excluded and
-independent.
+embeddings onto an external USB HDD. Existing `repro/` project remains excluded
+and independent.
+
+**The backend is Milvus with a `DISKANN` index.** Qdrant/HNSW remains in the code
+and is still selectable, but it does not work on this storage medium — see
+[why below](#왜-diskann인가--qdrant-hnsw는-왜-기각됐나).
 
 ```bash
 uv sync
 
-# First run: choose one persistent bundle directory.
-uv run wikipedia-ingest qdrant --bundle-dir /Volumes/large-disk/wikipedia
+# First run: choose one persistent bundle directory on the HDD.
+# --max-shards 100 ≈ 10M records; the full 471 shards are 47,018,430.
+uv run wikipedia-ingest milvus \
+  --bundle-dir /Volumes/agentic_rag/wikipedia_diskann \
+  --max-shards 100 --disable-xet --download-timeout 30
 
-# Interrupted run: bundle path, Qdrant settings, downloads, and checkpoints are reused.
-uv run wikipedia-ingest qdrant
-uv run wikipedia-inspect
-
-# Remote Milvus remains environment-configured.
-MILVUS_URI=http://localhost:19530 uv run wikipedia-ingest milvus
+# Interrupted run: bundle path, Milvus settings, downloads, and checkpoints are reused.
+uv run wikipedia-ingest milvus
+uv run wikipedia-inspect --backend milvus
 ```
 
+Ingest starts the Milvus stack itself, loads the shards, calls `flush()`, then
+waits for the index to finish before returning. It reports the final
+`index_type` / `indexed_rows` so a run that silently fell back to brute force is
+visible.
+
 Full English dataset contains 47,018,430 1024-dimensional records and transfers
-roughly 205 GB. Remote Qdrant ingestion runs one download-and-upsert pipeline per
+roughly 205 GB; 100 shards is about 43 GB. Milvus and embedded Qdrant (`--path`)
+ingest serially, while remote Qdrant runs one download-and-upsert pipeline per
 worker. Each worker checkpoints and deletes its current Parquet shard before
 claiming another, so raw source storage holds at most `--max-workers` complete
-shards plus resumable partial files and the retained BGE-M3 model. Milvus and
-embedded Qdrant (`--path`) remain serial. Local Qdrant data is created under
-`bundle_dir/qdrant` and grows independently with the index and payloads. Qdrant
-storage must use a POSIX-compatible filesystem with block-level access, such as
-APFS or ext4; ExFAT, NTFS, and network filesystems are rejected before Qdrant
-starts.
+shards plus resumable partial files and the retained BGE-M3 model. Storage must
+use a POSIX-compatible filesystem with block-level access, such as APFS or ext4;
+ExFAT, NTFS, and network filesystems are rejected before the backend starts.
+
+### 왜 DiskANN인가 — Qdrant HNSW는 왜 기각됐나
+
+47M을 Qdrant HNSW로 이 HDD에 적재하는 것까지는 성공했으나(209 GB, 13시간),
+**검색 1회가 48분에도 완료되지 않았다.** 원인은 버그가 아니라 자료구조와 매체의
+불일치다.
+
+```
+HNSW가 요구하는 것 : 랜덤 4 KB 접근 수만 회를 밀리초 안에
+HDD가 제공하는 것   : 랜덤 68 IOPS, 건당 16 KB 강제 (iostat 실측)
+```
+
+쿼리당 디스크 읽기 횟수가 갈린다. HNSW는 탐색 중 방문 노드마다 원본 벡터를 읽어야
+해서 `O(세그먼트 수 × ef × 홉)`이고, DiskANN은 PQ 압축본을 램에 두고 탐색하므로
+`O(search_list)` — 수백 회이고 코퍼스 크기에 거의 무관하다. 68 IOPS 매체에서는
+후자만 성립한다.
+
+| | Qdrant HNSW (47M) | Milvus DiskANN (1M 실측) |
+|---|---|---|
+| 콜드 검색 | **48분에도 미완료** | **17.7초** |
+| 컬렉션 로드 | — | 25.5분 |
+
+Docker VM 램을 8.2 → 27.4 GB로 늘리는 가설은 기각됐다 — Qdrant는 2.96 GB만 썼다.
+병목이 캐시 용량이 아니라 랜덤 IOPS이기 때문이다. 세그먼트 96→4 병합과
+`hnsw_on_disk: false`를 걸어도 40~90초로, 목표(수 초)에 못 미치면서 재색인 수 시간을
+쓴다. 상세 진단은
+[`repro/experiments/wikipedia_hdd/HNSW_HDD_MISMATCH.md`](repro/experiments/wikipedia_hdd/HNSW_HDD_MISMATCH.md),
+결정 경위는
+[`DEVLOG.md`](repro/experiments/wikipedia_hdd/DEVLOG.md),
+설계는
+[`docs/superpowers/specs/2026-08-03-milvus-diskann-design.md`](docs/superpowers/specs/2026-08-03-milvus-diskann-design.md)
+에 있다.
+
+### Milvus stack layout
+
+Milvus standalone is three containers (`etcd`, `minio`, `milvus`) brought up by
+compose project `wikipedia-milvus`. `ensure_milvus()` renders
+`docker-compose.yml` and `milvus.yaml` into the storage directory, starts Docker
+Desktop on macOS if needed, and waits on `http://localhost:9091/healthz` (300 s).
+
+```
+<bundle-dir>/
+├── dataset/            # parquet shards, deleted as each one is ingested
+├── models/bge-m3       # pinned encoder, query-side only
+├── state/              # ingest checkpoints
+├── manifest.json
+└── milvus/             # --milvus-storage-dir, defaults here
+    ├── docker-compose.yml
+    ├── milvus.yaml     # queryNode.enableDisk: true
+    └── volumes/{etcd,minio,milvus}
+```
+
+`queryNode.enableDisk` defaults to `false` upstream and a `DISKANN` index cannot
+be loaded without it, so `milvus.yaml` sets it. Only `volumes/milvus` is read on
+the query path; MinIO serves ingest and collection load. Measured footprint on
+this hardware is about 25 GB per 1M records (minio 21 GB, milvus 3.8 GB, etcd
+62 MB), so a 10M ingest needs roughly 250 GB — extrapolated from the 1M run, not
+measured at 10M.
+
+Images are pinned: `milvusdb/milvus:v2.5.27` (override with `MILVUS_IMAGE`),
+`quay.io/coreos/etcd:v3.5.18`, `minio/minio:RELEASE.2024-05-28T17-19-04Z`.
+
+### Milvus options
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--index-type` | `DISKANN` | Any Milvus index name; `AUTOINDEX` reverts to the in-memory path |
+| `--search-list` | `100` | DiskANN candidate pool. Raises recall and latency together |
+| `--milvus-storage-dir` | `<bundle-dir>/milvus` | Stack volumes. Put this on the medium under test |
+| `--milvus-truncate-text` | off | See VARCHAR limit below |
+| `--milvus-upsert` | off | See resume warning below |
+| `--batch-size` | `1000` | Qdrant defaults lower; 256 would cost 39k round trips per 10M |
+
+Both `--index-type` and `--search-list` are persisted to `manifest.json`, so a
+resumed run reuses them without repeating the flags.
 
 ### Bundle selection and bounded runs
 
@@ -258,16 +340,21 @@ new directory updates marker without moving or deleting old bundle.
 
 ```bash
 # Small development ingest, marked partial but valid.
-uv run wikipedia-ingest qdrant \
+uv run wikipedia-ingest milvus \
   --bundle-dir "/Volumes/External Disk/wiki" \
   --max-shards 2
 
 # Bound an import independently.
-uv run wikipedia-ingest qdrant --max-shards 1 --max-records 10000 --batch-size 256
+uv run wikipedia-ingest milvus --max-shards 1 --max-records 10000 --batch-size 256
 
 # Select and remember another bundle directory.
 uv run wikipedia-ingest milvus --bundle-dir /another/wiki
 ```
+
+A partial bundle is a separate bundle, not a smaller version of an existing one:
+`prepare_bundle` rewrites `manifest.json` on every run, so pointing a
+`--max-shards` run at a completed bundle overwrites its record of what was
+ingested. Use a distinct `--bundle-dir`.
 
 Ingest honors `HF_TOKEN`, `--max-workers`, `--dataset-revision`, and
 `--model-revision`. `--max-workers` defaults to 4 and controls remote Qdrant
@@ -283,22 +370,26 @@ machine with spare CPU, disk, and network capacity, enable hf-xet's
 high-performance mode:
 
 ```bash
-uv run wikipedia-ingest qdrant --max-workers 16 --high-performance
+uv run wikipedia-ingest milvus --max-workers 16 --high-performance
 ```
 
-Store Qdrant vectors as native float16 to halve vector storage. Repeat the flag
-on resumed runs; changing it requires cleaning up the existing Qdrant storage
-and removing the `qdrant` section from `manifest.json` first.
+`--float16` is Qdrant-only and stores vectors as native float16 to halve vector
+storage. Repeat the flag on resumed runs; changing it requires cleaning up the
+existing Qdrant storage and removing the `qdrant` section from `manifest.json`
+first. It also halves the bytes read per query, so it changes the storage-medium
+treatment this experiment measures — leave it off for HDD runs.
 
 ```bash
 uv run wikipedia-ingest qdrant --float16
 ```
 
-If hf-xet repeatedly stops making progress, rerun with resumable HTTP and an
-explicit stall timeout. Existing completed and partial files are reused:
+hf-xet stalled twice at ~270 MB with zero byte growth on this network. If that
+happens, rerun with resumable HTTP and an explicit stall timeout; existing
+completed and partial files are reused. **The flags are not persisted, so they
+must be repeated on every resume.**
 
 ```bash
-uv run wikipedia-ingest qdrant --disable-xet --download-timeout 30
+uv run wikipedia-ingest milvus --disable-xet --download-timeout 30
 ```
 
 Completed shards are recorded per backend before deletion. A failed or
@@ -311,14 +402,57 @@ bound. Qdrant reads `QDRANT_URL`, `QDRANT_API_KEY`, and
 `MILVUS_DB_NAME`, and `MILVUS_COLLECTION`. Checkpoints live in bundle `state/`
 unless `--checkpoint` is supplied.
 
+### Measuring latency
+
+```bash
+uv run wikipedia-inspect --backend milvus \
+  --bundle-dir /Volumes/agentic_rag/wikipedia_diskann \
+  --runs 10 --search-list 100
+```
+
+`inspect` loads the collection explicitly and reports load time separately from
+search latency. That separation matters here: on this HDD the 1M collection took
+1,529 s to load and 17.7 s for the first query, and folding the two together had
+previously been read as a 20 s search.
+
+**Every run uses a different query.** Timing one query N times measures the page
+cache from the second run onward, because the search re-walks the graph path the
+previous one already faulted in — the wrong measurement for an on-disk index.
+`--runs N` takes the first N of 20 built-in queries spread across unrelated
+topics; `--query` repeated supplies your own set. Asking for more runs than
+distinct queries is an error rather than a silent recycle.
+
+```bash
+uv run wikipedia-inspect --backend milvus --runs 3 \
+  --query "What causes auroras?" \
+  --query "Who wrote the Tale of Genji?" \
+  --query "How are black holes detected?"
+```
+
+`summary:` reports `cold` (first query, nothing cached) alongside mean, median,
+min, and max. Cite the cold number as the treatment; the spread across the
+remaining queries is the steady state an agent would actually see.
+
+Numbers measured before this change — including 71–80 ms warm on the 1M
+bundle — came from one repeated query and are not comparable.
+
+Useful while a query is in flight:
+
+```bash
+iostat -d disk6 1 4                       # tps = IOPS, KB/t = transfer unit
+docker compose -f <bundle>/milvus/docker-compose.yml -p wikipedia-milvus ps
+curl -s http://localhost:9091/healthz
+```
+
 ### Python search API
 
 ```python
-from wikipedia import Encoder, QdrantConfig, QdrantVectorDB, search_text
+from wikipedia import Encoder, MilvusConfig, MilvusVectorDB, search_text
 
 encoder = Encoder()  # Eagerly load pinned local BGE-M3 before serving queries.
-with QdrantVectorDB(QdrantConfig(url="http://localhost:6333")) as db:
+with MilvusVectorDB(MilvusConfig(uri="http://localhost:19530")) as db:
     db.ensure_collection()
+    db.load()  # Reads the on-disk index; do this before timing anything.
     vector_hits = db.search([0.0] * 1024, limit=5)
     text_hits = search_text(db, encoder, "What causes auroras?", limit=5)
 ```
@@ -327,3 +461,34 @@ with QdrantVectorDB(QdrantConfig(url="http://localhost:6333")) as db:
 explicit instead of adding cold-start work to the first text query. Ingestion and
 vector-only search never load the encoder. Dataset embeddings are inserted unchanged.
 No filters, reranking, sparse, or hybrid search are included.
+
+`QdrantConfig` / `QdrantVectorDB` have the same shape and remain importable.
+
+### Known limits
+
+- **`insert` is not idempotent.** Ingest writes with `insert`, because Milvus
+  implements `upsert` as delete + insert and a bulk load into a fresh collection
+  then spends the disk compacting one tombstone per record — measured at 18 GB
+  for 200k records and 680 MB/min of pure compaction. The cost is that resuming
+  a partial ingest duplicates rows. Either wipe the volumes and checkpoints and
+  start over, or resume with `--milvus-upsert`.
+- **Milvus caps VARCHAR at 65535 bytes** and has no larger string type. A longer
+  chunk fails the ingest by default. `--milvus-truncate-text` stores it cut to
+  fit on a UTF-8 boundary and reports how many were truncated; embeddings are
+  unaffected, so ranking does not change but the returned payload does. Two of
+  1,000,000 records hit this.
+- **Milvus requires NVMe SSD for DISKANN.** A USB HDD is outside the supported
+  range. It works, but published figures will not reproduce — say so when
+  reporting results.
+- **Index state needs `indexed_rows`, not `state`.** Milvus 2.5.27 reports
+  `state=Finished` with `indexed_rows=0` before any segment is built, and
+  reports `pending_index_rows` equal to the total once everything is built.
+  `wait_for_index()` keys on `indexed_rows >= total_rows`, confirmed twice.
+- **Small ingests never build an index.** Milvus only indexes sealed segments,
+  so a load that does not fill one stays searchable by brute force alone and
+  DiskANN never engages. 200k records were not enough; 600k were.
+- **etcd fsyncs on every write** and lives on the HDD. It has held so far; if it
+  destabilizes at 10M, move only the etcd volume to internal SSD — that data is
+  small and off the query path.
+- **MinIO stores the source binlogs on top of the index**, roughly 21 GB per 1M
+  records. Budget it separately from the index.

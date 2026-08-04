@@ -10,6 +10,10 @@ from .types import SearchResult, WikipediaRecord
 
 DEFAULT_INDEX_TYPE = "DISKANN"
 DEFAULT_SEARCH_LIST = 100
+# Sized for the 1M collection, which loaded off the external HDD in 1,529 s.
+# Load time scales with the collection and the storage medium, so a larger
+# collection has to raise this rather than inherit it.
+DEFAULT_LOAD_TIMEOUT = 1800.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +25,7 @@ class MilvusConfig:
     database: str = "default"
     collection_name: str = "wikipedia_2024_06_bge_m3_en_v1"
     timeout: float = 60.0
-    load_timeout: float = 1800.0
+    load_timeout: float = DEFAULT_LOAD_TIMEOUT
     index_timeout: float = 14400.0
     search_timeout: float = 3600.0
     # Milvus implements upsert as delete + insert, so a bulk load into a fresh
@@ -327,6 +331,21 @@ class MilvusVectorDB(VectorDB):
             self._loaded = True
 
     _load = load
+
+    def release(self) -> None:
+        """Drop the collection out of the query node.
+
+        A loaded collection keeps every newly inserted row in query-node memory
+        until the row is sealed and indexed, so a bulk load into a loaded
+        collection grows unbounded. Measured on the 10M ingest: the node reached
+        25.9 GB of the 29.4 GB VM at ~5M rows and the kernel killed Milvus
+        mid-shard, which duplicates that shard because insert is not idempotent.
+        Load state survives restarts, so an ingest cannot assume it is unloaded.
+        """
+        self.client.release_collection(
+            self.config.collection_name, timeout=self.config.load_timeout
+        )
+        self._loaded = False
 
     def search(self, vector: Any, *, limit: int = 10) -> list[SearchResult]:
         if limit < 1:

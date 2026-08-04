@@ -9,9 +9,12 @@ from wikipedia.download import MODEL_REQUIRED_FILES
 
 
 class FakeDatabase:
+    events: list[str] = []
+
     def __init__(self, config: object) -> None:
         self.config = config
         self.flushed = 0
+        FakeDatabase.events = self.events = []
 
     def __enter__(self) -> "FakeDatabase":
         return self
@@ -21,6 +24,9 @@ class FakeDatabase:
 
     def flush(self) -> None:
         self.flushed += 1
+
+    def release(self) -> None:
+        self.events.append("release")
 
     def wait_for_index(self, **_: object) -> dict[str, object]:
         return {
@@ -343,6 +349,36 @@ def test_milvus_keeps_ingest_serial(
 
     assert ingest_calls[0]["max_workers"] == 1
     assert ingest_calls[0]["worker_database_factory"] is None
+
+
+def test_milvus_releases_the_collection_before_ingesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loaded collection holds every inserted row in query-node memory too.
+
+    The 10M run OOM-killed Milvus at ~5M rows because the collection stayed
+    loaded from an earlier benchmark; the load state survives restarts, so the
+    ingest has to drop it rather than assume a fresh collection.
+    """
+    paths = BundlePaths.from_dir(tmp_path)
+    monkeypatch.setattr(
+        cli.BundlePaths,
+        "resolve",
+        classmethod(lambda cls, bundle_dir=None: paths),
+    )
+    monkeypatch.setattr(cli, "prepare_bundle", lambda *args, **kwargs: _prepare(paths))
+    monkeypatch.setattr(cli, "ensure_milvus", lambda *args, **kwargs: "ready")
+    monkeypatch.setattr(cli, "MilvusVectorDB", FakeDatabase)
+    monkeypatch.setattr(
+        cli,
+        "ingest_wikipedia",
+        lambda database, bundle_dir, **kwargs: database.events.append("ingest") or 0,
+    )
+    monkeypatch.setattr(cli, "download_model", lambda *args, **kwargs: None)
+
+    cli.main(["milvus"])
+
+    assert FakeDatabase.events[:2] == ["release", "ingest"]
 
 
 def test_qdrant_float16_is_saved_and_passed_to_database(

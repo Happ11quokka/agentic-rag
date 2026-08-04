@@ -14,7 +14,12 @@ from typing import Any
 from .bundle import BundlePaths, load_manifest
 from .encoder import Encoder, search_text
 from .ingest import default_checkpoint_path
-from .milvus import DEFAULT_SEARCH_LIST, MilvusConfig, MilvusVectorDB
+from .milvus import (
+    DEFAULT_LOAD_TIMEOUT,
+    DEFAULT_SEARCH_LIST,
+    MilvusConfig,
+    MilvusVectorDB,
+)
 from .milvus_runtime import (
     DEFAULT_MILVUS_IMAGE,
     DEFAULT_MILVUS_PROJECT,
@@ -26,7 +31,34 @@ from .qdrant_runtime import DEFAULT_QDRANT_URL, ensure_qdrant
 from .types import SearchResult
 
 DEFAULT_COLLECTION = "wikipedia_2024_06_bge_m3_en_v1"
-DEFAULT_QUERY = "What causes auroras?"
+
+# Timing the same query repeatedly measures the page cache, not the index: the
+# second search walks the graph path the first one already faulted in. That is
+# the wrong measurement for an on-disk index, where the disk reads are the cost
+# under study. These are semantically spread so consecutive searches land in
+# different regions of the embedding space and touch different pages.
+DEFAULT_QUERIES: tuple[str, ...] = (
+    "What causes auroras?",
+    "How does photosynthesis convert light into chemical energy?",
+    "Who composed the Brandenburg Concertos?",
+    "How do mRNA vaccines train the immune system?",
+    "Why did the Roman Republic become an empire?",
+    "How are black holes detected?",
+    "What role do mitochondria play in a cell?",
+    "How does a semiconductor transistor switch current?",
+    "What caused the 1929 stock market crash?",
+    "How do migratory birds navigate?",
+    "What is plate tectonics?",
+    "Who wrote the Tale of Genji?",
+    "How does anesthesia produce unconsciousness?",
+    "What is the Riemann hypothesis?",
+    "How did the printing press change Europe?",
+    "What are the stages of stellar evolution?",
+    "How does the human eye perceive colour?",
+    "What were the origins of the Silk Road?",
+    "How do glaciers shape valleys?",
+    "What is the function of the blood-brain barrier?",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +77,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
     return parsed
 
 
@@ -119,15 +158,27 @@ def inspect_bundle(
 def benchmark_query(
     database: Any,
     encoder: Any,
-    query: str,
+    queries: Sequence[str],
     *,
-    runs: int,
     limit: int,
     timer: Callable[[], float] = time.perf_counter,
 ) -> tuple[list[float], list[SearchResult]]:
+    """Time one search per query, in order.
+
+    Queries must be distinct. Repeating one would report the page cache rather
+    than the index, which is the measurement this benchmark exists to avoid.
+    """
+    if not queries:
+        raise ValueError("benchmark needs at least one query")
+    if len(set(queries)) != len(queries):
+        raise ValueError(
+            "benchmark queries must be distinct; a repeated query re-walks the "
+            "graph path the previous search already cached and reports the page "
+            "cache instead of the index"
+        )
     latencies: list[float] = []
     results: list[SearchResult] = []
-    for _ in range(runs):
+    for query in queries:
         started = timer()
         results = search_text(database, encoder, query, limit=limit)
         latencies.append((timer() - started) * 1000)
@@ -163,8 +214,46 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"DiskANN candidate pool size (default: {DEFAULT_SEARCH_LIST})",
     )
     parser.add_argument("--collection", help="collection name")
-    parser.add_argument("--query", default=DEFAULT_QUERY)
+    parser.add_argument(
+        "--load-timeout",
+        type=_positive_float,
+        help=(
+            "seconds to wait for the Milvus collection load (default: "
+            f"{DEFAULT_LOAD_TIMEOUT:.0f}). Load time scales with the "
+            "collection and the storage medium — 1M took 1,529 s off this HDD — "
+            "so a larger collection needs a larger budget than the default"
+        ),
+    )
+    parser.add_argument(
+        "--query",
+        action="append",
+        dest="queries",
+        metavar="TEXT",
+        help=(
+            "query to time; repeat to supply your own set. Each run uses a "
+            "different query, so at least --runs of them are needed. Defaults to "
+            f"the first --runs of {len(DEFAULT_QUERIES)} built-in queries"
+        ),
+    )
     return parser
+
+
+def select_queries(runs: int, queries: Sequence[str] | None) -> list[str]:
+    """Pick one distinct query per run, from the built-in pool unless overridden.
+
+    Refuses to recycle a query rather than silently reporting the page cache on
+    every run past the first pass.
+    """
+    pool = list(queries) if queries else list(DEFAULT_QUERIES)
+    if len(set(pool)) != len(pool):
+        raise ValueError("queries must be distinct; a repeated query measures the page cache")
+    if runs > len(pool):
+        raise ValueError(
+            f"--runs {runs} needs {runs} distinct queries but only {len(pool)} "
+            "are available; pass more --query values or lower --runs. Reusing a "
+            "query would measure the page cache instead of the index"
+        )
+    return pool[:runs]
 
 
 def _open_qdrant(args: argparse.Namespace, summary: BundleSummary) -> Any:
@@ -215,21 +304,43 @@ def _open_qdrant(args: argparse.Namespace, summary: BundleSummary) -> Any:
 
 
 def _open_milvus(args: argparse.Namespace, summary: BundleSummary) -> Any:
+    return open_milvus(
+        summary,
+        uri=args.uri,
+        collection=args.collection,
+        search_list=args.search_list,
+        load_timeout=args.load_timeout,
+    )
+
+
+def open_milvus(
+    summary: BundleSummary,
+    *,
+    uri: str | None = None,
+    collection: str | None = None,
+    search_list: int | None = None,
+    load_timeout: float | None = None,
+) -> Any:
+    """Bring the stack up, validate the collection, and load it.
+
+    Shared by every command that measures against Milvus, so they all report the
+    same collection facts and pay the load cost in the same place.
+    """
     if summary.milvus is None:
         raise RuntimeError(
             "Milvus is not configured; run `uv run wikipedia-ingest milvus "
             "--bundle-dir /absolute/path` first"
         )
     saved = summary.milvus
-    uri = args.uri or os.environ.get("MILVUS_URI") or str(
+    uri = uri or os.environ.get("MILVUS_URI") or str(
         saved.get("uri", DEFAULT_MILVUS_URI)
     )
-    collection = args.collection or os.environ.get("MILVUS_COLLECTION") or str(
+    collection = collection or os.environ.get("MILVUS_COLLECTION") or str(
         saved.get("collection", DEFAULT_COLLECTION)
     )
     search_list = (
-        args.search_list
-        if args.search_list is not None
+        search_list
+        if search_list is not None
         else int(saved.get("search_list", DEFAULT_SEARCH_LIST))
     )
     runtime = ensure_milvus(
@@ -237,9 +348,18 @@ def _open_milvus(args: argparse.Namespace, summary: BundleSummary) -> Any:
         storage_dir=saved.get("storage_dir"),
         project=str(saved.get("project", DEFAULT_MILVUS_PROJECT)),
         image=str(saved.get("image", DEFAULT_MILVUS_IMAGE)),
+        # Recorded in the bundle rather than passed per-run: ensure_milvus
+        # rewrites the compose file when it differs, so a run that forgot this
+        # would move etcd back and restart the stack mid-experiment.
+        etcd_dir=saved.get("etcd_dir"),
     )
     print(f"milvus: {runtime} at {uri}")
 
+    load_timeout = (
+        load_timeout
+        if load_timeout is not None
+        else float(saved.get("load_timeout", DEFAULT_LOAD_TIMEOUT))
+    )
     config = MilvusConfig(
         uri=uri,
         token=os.environ.get("MILVUS_TOKEN"),
@@ -248,6 +368,7 @@ def _open_milvus(args: argparse.Namespace, summary: BundleSummary) -> Any:
         index_type=str(saved.get("index_type", "DISKANN")),
         search_params={"search_list": search_list},
         timeout=float(saved.get("timeout", 60.0)),
+        load_timeout=load_timeout,
     )
     database = MilvusVectorDB(config)
     if not database.client.has_collection(collection, timeout=config.timeout):
@@ -273,7 +394,7 @@ def _open_milvus(args: argparse.Namespace, summary: BundleSummary) -> Any:
 
     # Load before benchmarking so the first query does not report the cost of
     # reading the on-disk index off the storage medium as its search latency.
-    print("milvus: loading collection", flush=True)
+    print(f"milvus: loading collection (timeout {load_timeout:.0f} s)", flush=True)
     started = time.perf_counter()
     database.load()
     print(f"milvus: collection loaded in {time.perf_counter() - started:.1f} s")
@@ -315,25 +436,28 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 return
 
+            queries = select_queries(args.runs, args.queries)
             print("encoder: loading BGE-M3", flush=True)
             encoder_started = time.perf_counter()
             encoder = Encoder(summary.paths.bundle_dir, require_complete=False)
             print(f"encoder: ready in {time.perf_counter() - encoder_started:.1f} s")
-            print(f"query: {args.query!r}, runs={args.runs}, limit={args.limit}")
+            print(f"queries: {len(queries)} distinct, runs={args.runs}, limit={args.limit}")
             latencies, results = benchmark_query(
                 database,
                 encoder,
-                args.query,
-                runs=args.runs,
+                queries,
                 limit=args.limit,
             )
 
         values = ", ".join(f"{value:.1f}" for value in latencies)
         print(f"latency_ms: [{values}]")
         print(
-            f"summary: runs={args.runs}, mean={statistics.fmean(latencies):.1f} ms, "
+            f"summary: runs={args.runs}, cold={latencies[0]:.1f} ms, "
+            f"mean={statistics.fmean(latencies):.1f} ms, "
+            f"median={statistics.median(latencies):.1f} ms, "
             f"min={min(latencies):.1f} ms, max={max(latencies):.1f} ms"
         )
+        print(f"last query: {queries[-1]!r}")
         _print_results(results)
     except Exception as exc:
         parser.error(str(exc))

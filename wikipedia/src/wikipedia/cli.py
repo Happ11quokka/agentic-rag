@@ -444,6 +444,12 @@ def _main(argv: list[str] | None = None) -> None:
             "remote Qdrant (--max-workers still controls model download)"
         )
     with database:
+        if args.backend == "milvus":
+            # Load state survives restarts, so a collection left loaded by an
+            # earlier benchmark would hold every inserted row in query-node
+            # memory as well and eventually get the process OOM-killed.
+            status("releasing Milvus collection so ingest does not fill query-node memory")
+            database.release()
         count = ingest_wikipedia(
             database,
             paths.bundle_dir,

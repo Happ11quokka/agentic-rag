@@ -11,6 +11,8 @@ class FakeClient:
     def __init__(self, describe: list[dict[str, Any]] | None = None) -> None:
         self.inserted: list[list[dict[str, Any]]] = []
         self.upserted: list[list[dict[str, Any]]] = []
+        self.loaded: list[str] = []
+        self.released: list[str] = []
         self.flushed = 0
         self._describe = describe or []
         self.describe_calls = 0
@@ -25,6 +27,12 @@ class FakeClient:
 
     def flush(self, collection_name: str, timeout: float) -> None:
         self.flushed += 1
+
+    def load_collection(self, collection_name: str, timeout: float) -> None:
+        self.loaded.append(collection_name)
+
+    def release_collection(self, collection_name: str, timeout: float) -> None:
+        self.released.append(collection_name)
 
     def describe_index(
         self, collection_name: str, field: str, timeout: float
@@ -42,6 +50,32 @@ def _record(source_id: str = "a") -> WikipediaRecord:
         text="Charged particles produce auroras.",
         embedding=np.zeros(1024, dtype=np.float32),
     )
+
+
+def test_release_drops_the_collection_from_the_query_node() -> None:
+    """Writing into a loaded collection keeps every new row in query-node memory.
+
+    Measured on the 10M ingest: the query node reached 25.9 GB of the 29.4 GB VM
+    at ~5M inserted rows and the kernel OOM-killed Milvus mid-shard.
+    """
+    client = FakeClient()
+    database = MilvusVectorDB(MilvusConfig(), client=client)
+    database.load()
+
+    database.release()
+
+    assert client.released == ["wikipedia_2024_06_bge_m3_en_v1"]
+
+
+def test_release_lets_a_later_load_take_effect() -> None:
+    client = FakeClient()
+    database = MilvusVectorDB(MilvusConfig(), client=client)
+    database.load()
+    database.release()
+
+    database.load()
+
+    assert len(client.loaded) == 2
 
 
 def test_bulk_load_inserts_instead_of_upserting() -> None:
