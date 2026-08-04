@@ -444,6 +444,63 @@ docker compose -f <bundle>/milvus/docker-compose.yml -p wikipedia-milvus ps
 curl -s http://localhost:9091/healthz
 ```
 
+#### Loading a large collection
+
+`load_collection` on the 10M collection fails on stock settings, and the error
+misdescribes itself — it reads `OOM if load, memUsage = 26192 MB` when real
+process memory was 2,550 MB and nothing was short of RAM. The compose template
+sets five values to get past it; the diagnosis is in
+[`DEVLOG.md`](repro/experiments/wikipedia_hdd/DEVLOG.md#실측--10m-로드-거부의-정체-2026-08-05).
+
+| Setting | Default | Here | Why |
+|---|---|---|---|
+| `queryCoord.taskExecutionCap` | 256 | 4 | Every admitted segment load reserves a fixed 128 MiB against the memory guard until it *finishes*. 176 admitted in 311 ms, none finishing, is what reached 23.6 GB |
+| `queryCoord.loadTimeoutSeconds` | 600 | 36000 | The observer cancels a load that makes no segment-level progress inside the window |
+| `queryCoord.segmentTaskTimeout` | 120 s | 3600 s | One segment load off this disk was measured at 14m26s; past the deadline the read dies with `context canceled` |
+| `queryCoord.channelTaskTimeout` | 60 s | 600 s | Same problem, channel subscription |
+| `queryCoord.overloadedMemoryThresholdPercentage` | 90 | 95 | Margin only; it fixes nothing on its own |
+
+Two things that look like fixes and are not. Dropping the VM page cache does
+nothing — `GetUsedMemoryCount` reads `RSS - Shared` from statm, so file-backed
+pages are excluded by construction. Setting `mem_limit` makes it worse: Milvus
+takes `min(cgroup, physical)`, so a limit can only lower the ceiling.
+
+`DISKANN` is also not affected by the `mmap` flags — the index is always pulled
+to local disk and its PQ codes always held in RAM. The flags matter for the
+scalar payload, which is what they were added for.
+
+### Prefetching the next retrieval
+
+```bash
+uv run wikipedia-prefetch \
+  --bundle-dir ~/.cache/wikipedia_diskann \
+  --episodes 4 --decode-seconds 2.0 --think-seconds 0.4 --wrong-hops 2
+```
+
+Runs each multi-hop episode twice — plain, then with a drafter speculating on
+the next query — and compares. Alternates which arm goes first per episode, so
+neither inherits the page cache the other warmed.
+
+The two arms must return byte-identical passages; the report says `DIVERGENCE`
+if they do not, which is a bug signal rather than a result. Prefetch is used
+only on an exact normalized match, so it changes when a search happens and never
+what it returns.
+
+Without `--draft-url` the drafter is a perfect replay of the episode. That is a
+**ceiling for the mechanism, not a measurement of a drafter** — it hits every
+hop by construction. `--wrong-hops` forces misses so the cost of a wasted
+speculative search on a busy disk shows up, and `--think-seconds` charges
+prediction the time a real model would spend. With a server available:
+
+```bash
+uv run wikipedia-prefetch --draft-url http://localhost:8001 \
+  --draft-model llama-3.2-1b-instruct
+```
+
+`--decode-seconds` stands in for the target model decoding the next thought. It
+is the window a prefetch has to work in, so it bounds the result and is printed
+with it. Report it; do not bury it.
+
 ### Python search API
 
 ```python
