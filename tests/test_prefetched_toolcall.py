@@ -13,6 +13,7 @@ def model_call(
     query: str | None = None,
     content: str = "",
     cancelled: bool = False,
+    client_stop_reason: str | None = None,
     request_start_ns: int = 1_000_000,
 ) -> dict[str, Any]:
     tool_calls = []
@@ -38,6 +39,7 @@ def model_call(
         "tool_calls": tool_calls,
         "finish_reason": "tool_calls" if tool_calls else "stop",
         "cancelled": cancelled,
+        "client_stop_reason": client_stop_reason,
         "usage": {"prompt_tokens": 2, "completion_tokens": 3},
         "timing": {
             "request_wall_ms": 4.0,
@@ -87,7 +89,15 @@ def test_coordinator_cancels_old_generation_and_runs_one_latest_query() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def stream_completion(self, messages, generation, *, cancel_event):
+        def stream_completion(
+            self,
+            messages,
+            generation,
+            *,
+            cancel_event,
+            stop_after_complete_tool_call,
+        ):
+            assert stop_after_complete_tool_call is True
             self.calls += 1
             if self.calls == 1:
                 first_started.set()
@@ -200,7 +210,9 @@ def test_record_result_separates_role_latencies_and_coverage(
     )
     draft_retrieval = retrieval("same", qdrant_end_ns=20_000_000)
     target_call = model_call([], content="answer")
-    draft_call = model_call([], query="same")
+    draft_call = model_call(
+        [], query="same", client_stop_reason="complete_tool_call"
+    )
     result = {
         "target_outcome": {
             "terminal_status": "final",
@@ -232,6 +244,8 @@ def test_record_result_separates_role_latencies_and_coverage(
     assert metrics["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"] == 1
     assert metrics["prefetch"]["coverage_rate"] == 1
     assert metrics["prefetch"]["exact_warm_ready_rate"] == 1
+    assert metrics["prefetch"]["draft_tool_call_early_stops"] == 1
+    assert metrics["prefetch"]["cancelled_draft_generations"] == 0
 
     prefetched_toolcall.render_report(results)
     output = capsys.readouterr().out
@@ -240,27 +254,90 @@ def test_record_result_separates_role_latencies_and_coverage(
     assert "#" in output
 
 
+def test_early_stop_cancellation_and_stale_counts_are_independent() -> None:
+    result = {
+        "target_outcome": {
+            "terminal_status": "final",
+            "timing": {"end_to_end_ms": 50.0},
+            "llm_calls": [],
+            "retrieval_calls": [],
+        },
+        "draft_attempts": [
+            {
+                "sync_id": 0,
+                "sync_published_ns": 0,
+                "status": "retrieved",
+                "model_call": model_call(
+                    [], query="early", client_stop_reason="complete_tool_call"
+                ),
+                "retrieval_call": retrieval("early"),
+            },
+            {
+                "sync_id": 1,
+                "sync_published_ns": 0,
+                "status": "superseded",
+                "model_call": model_call([], cancelled=True),
+                "retrieval_call": None,
+            },
+            {
+                "sync_id": 2,
+                "sync_published_ns": 0,
+                "status": "retrieved_stale",
+                "model_call": model_call([], query="stale"),
+                "retrieval_call": retrieval("stale"),
+            },
+        ],
+        "query_pairs": [],
+    }
+    results = prefetched_toolcall._new_results()
+
+    prefetched_toolcall.record_result(results, result)
+
+    assert results["draft_tool_call_early_stops"] == 1
+    assert results["cancelled_draft_generations"] == 1
+    assert results["stale_draft_queries"] == 1
+
+
 def test_run_benchmark_syncs_after_target_retrieval() -> None:
     draft_retrieved = threading.Event()
+    second_draft_started = threading.Event()
 
     class TargetClient:
         def __init__(self) -> None:
             self.calls = 0
+            self.requests = []
 
         def stream_completion(self, messages, generation):
+            self.requests.append((deepcopy(messages), deepcopy(generation)))
             self.calls += 1
             if self.calls == 1:
                 return model_call(messages, query="same")
+            assert second_draft_started.wait(timeout=1)
             return model_call(messages, content="answer")
 
     class DraftClient:
         def __init__(self) -> None:
             self.calls = 0
+            self.requests = []
 
-        def stream_completion(self, messages, generation, *, cancel_event):
+        def stream_completion(
+            self,
+            messages,
+            generation,
+            *,
+            cancel_event,
+            stop_after_complete_tool_call,
+        ):
+            assert stop_after_complete_tool_call is True
+            self.requests.append((deepcopy(messages), deepcopy(generation)))
             self.calls += 1
             if self.calls == 1:
-                return model_call(messages, query="same")
+                return model_call(
+                    messages,
+                    query="same",
+                    client_stop_reason="complete_tool_call",
+                )
+            second_draft_started.set()
             cancel_event.wait(timeout=1)
             return model_call(messages, cancelled=True)
 
@@ -276,10 +353,12 @@ def test_run_benchmark_syncs_after_target_retrieval() -> None:
                 query, qdrant_start_ns=30_000_000, qdrant_end_ns=40_000_000
             )
 
+    target_client = TargetClient()
+    draft_client = DraftClient()
     result = prefetched_toolcall.run_benchmark(
         Question("q1", "question?", ()),
-        TargetClient(),
-        DraftClient(),
+        target_client,
+        draft_client,
         TargetRetriever(),
         DraftRetriever(),
     )
@@ -291,6 +370,20 @@ def test_run_benchmark_syncs_after_target_retrieval() -> None:
     ]
     assert result["sync_events"][1]["message_count"] == 4
     assert result["query_pairs"][0]["exact_warm_ready"] is True
+    assert target_client.requests[0] == draft_client.requests[0]
+    assert target_client.requests[1] == draft_client.requests[1]
+    assert all(
+        attempt["sync_prompt_hash"]
+        == prefetched_toolcall.prompt_hash(
+            attempt["model_call"]["request"]["messages"]
+        )
+        for attempt in result["draft_attempts"]
+        if attempt["model_call"] is not None
+    )
+    assert (
+        result["draft_attempts"][0]["model_call"]["client_stop_reason"]
+        == "complete_tool_call"
+    )
     assert (
         sum(
             attempt["retrieval_call"] is not None

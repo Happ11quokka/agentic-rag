@@ -331,17 +331,21 @@ No filters, reranking, sparse, or hybrid search are included.
 ## 11. Local experiments
 
 ```bash
-# Download and verify pinned main and draft GGUF files.
+# Download and verify every pinned GGUF in the experiment model catalog.
 uv run download-models
 
-# Select an experiment, including prefetched-toolcall, and enter run counts.
+# Select an experiment, target/draft models, and run counts.
 uv run run-experiment
 ```
 
 `run-experiment` is intentionally interactive and accepts no arguments. Each
-orchestrator uses Python constants instead of TOML configuration, prepares its
-runtime, prints progress and its final metric table, and stores benchmark records
-under `experiment/results/`:
+LLM experiment accepts any catalog model for either role, including the same model
+for both roles. Enter selects Qwen3 14B Q4_K_M for target and Qwen3 1.7B Q8_0 for
+draft by default; Qwen3 4B Q4_K_M and Qwen3 0.6B Q8_0 remain selectable. The
+`vectordb` experiment skips model selection because it runs no LLM. Each orchestrator
+uses Python constants instead of TOML configuration, prepares its runtime, prints
+progress and its final metric table, and stores benchmark records under
+`experiment/results/`:
 
 ```text
 experiment/results/<experiment>/<UTC-timestamp>-<short-id>/
@@ -356,23 +360,38 @@ include every search query and the exact truncated result snippets returned to t
 model. Warmup calls and llama-server logs are intentionally excluded. Interrupted or
 failed runs retain completed JSONL rows and record the failure in `manifest.json`.
 
-- `parallel` starts Qwen3 14B and 4B servers together, sends paired identical
-  FanOutQA prompts, and reports TTFT plus per-model and combined decode throughput.
-- `independent-run` runs Qwen3 14B and 4B in isolated, non-overlapping server
-  phases with the same prompts and generation settings as `parallel`. It reports
-  per-model TTFT and decode throughput without a combined metric.
+- `parallel` starts the selected target and draft servers together, sends paired
+  identical FanOutQA prompts, and reports TTFT plus per-model and combined decode
+  throughput.
+- `parallel-scheduled` loads both GGUF models into one native process with separate
+  llama contexts, Q8 KV caches, and samplers. It prefills draft then main and gives
+  each active model a non-preemptible 200 ms decode slice in draft/main round-robin
+  order. When one model finishes, the other keeps receiving slices without further
+  role switches. This is cooperative scheduling of resident models, not
+  cross-model batching: only one model submits GPU work at a time.
+- `independent-run` runs the selected target and draft in isolated, non-overlapping
+  server phases with the same prompts and generation settings as `parallel`. It
+  reports per-model TTFT and decode throughput without a combined metric.
 - `tooluse` runs the models in separate phases against Qdrant using Qwen's native,
-  sequential `search` tool calls and a 512-token thinking budget per turn. It
-  reports end-to-end question latency, encoder/Qdrant retrieval latency, generated
-  tokens around queries, zero/one-query regressions, incomplete-run diagnostics,
-  and failure statuses. End-to-end and Qdrant RPC distributions are printed as
-  horizontal ASCII histograms. Each request has a 180-second timeout; each
-  multi-turn question has a separate 600-second timeout.
-- `prefetched-toolcall` runs the 14B target and 4B draft together. The draft
-  receives the target transcript after each completed target retrieval, issues at
-  most one speculative search, and never changes target results. It reports target
-  end-to-end time, role-separated encoder/Qdrant latency, query coverage and overlap,
-  warm-before-use lead time, cancellation/stale-work counts, and LLM contention
+  sequential `search` tool calls and a 512-token thinking budget per turn. Target
+  and draft use the same FanOutQA agent prompt, search schema, and generation
+  policy, and begin each question with identical system/user messages. Their later
+  search transcripts remain role-local and independent. It reports end-to-end
+  question latency, encoder/Qdrant retrieval latency, generated tokens around
+  queries, zero/one-query regressions, incomplete-run diagnostics, and failure
+  statuses. End-to-end and Qdrant RPC distributions are printed as horizontal
+  ASCII histograms. Each request has a 180-second timeout; each multi-turn question
+  has a separate 600-second timeout.
+- `prefetched-toolcall` runs the selected target and draft together. The draft
+  uses the same FanOutQA agent prompt, search schema, and generation policy as the
+  target. It starts from the same system/user messages, then receives an exact
+  target transcript snapshot after each completed target retrieval and issues at
+  most one speculative search. Once the draft has streamed one complete, valid
+  `search` tool call, the client closes that stream immediately and starts
+  retrieval; target streams still collect normal finish and usage events. Draft
+  work never changes target results. The experiment reports target end-to-end time,
+  role-separated encoder/Qdrant latency, query coverage and overlap, warm-before-use
+  lead time, distinct early-stop/cancellation/stale-work counts, and LLM contention
   diagnostics, with ASCII histograms for target end-to-end and target/draft Qdrant
   RPC latency. Traces retain target outcomes, draft attempts, sync events, and
   target/draft query associations for comparison with independent runs.
@@ -389,6 +408,36 @@ page-cache eviction is not performed. Tool-use, prefetched-toolcall, and vector
 experiments accept a paused, partially ingested Wikipedia collection with a warning
 and the current point count, but refuse to measure during active ingestion. The
 `parallel` and `independent-run` experiments have no vector-database dependency.
+`parallel-scheduled` also has no vector-database or `llama-server` dependency, but
+requires llama.cpp build 8360 or newer as an installed CMake package. On macOS,
+Homebrew's package is discovered through `pkg-config`:
+
+```bash
+brew install llama.cpp cmake pkg-config
+uv run run-experiment  # choose parallel-scheduled
+```
+
+On Linux, build llama.cpp with the desired CUDA options, install it, then expose
+the install prefix:
+
+```bash
+cmake -S /path/to/llama.cpp -B /path/to/llama.cpp/build \
+  -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/opt/llama.cpp
+cmake --build /path/to/llama.cpp/build -j
+cmake --install /path/to/llama.cpp/build
+export LLAMA_CPP_PREFIX=/opt/llama.cpp
+uv run run-experiment  # choose parallel-scheduled
+```
+
+`LLAMA_SCHEDULED_ENGINE=/absolute/path` overrides native build discovery. Otherwise,
+source is compiled once into `agent/scheduling/.build/<cache-key>/`; key includes OS,
+architecture, llama build/commit, and native source hash. Compare `parallel` and
+`parallel-scheduled` using identical task/repetition counts, GGUF files, llama.cpp
+build, and generation constants. Scheduled traces separate effective throughput and
+TTFT from active-compute throughput, queued decode time, slice count, role switches,
+quota overshoot, and both-active time share.
+
 Missing GGUF files produce the `uv run download-models` instruction; missing bundle,
 BGE-M3, Docker, Qdrant, or llama.cpp prerequisites similarly produce specific setup
 guidance. Redirect stdout if a durable report is wanted.

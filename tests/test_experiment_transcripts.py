@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 from contextlib import contextmanager
@@ -65,7 +66,10 @@ def _patch_inference_runtime(module, tmp_path, monkeypatch) -> Question:
     monkeypatch.setattr(
         module,
         "require_models",
-        lambda: {"main": Path("/models/main"), "draft": Path("/models/draft")},
+        lambda model_specs=None: {
+            "main": Path("/models/main"),
+            "draft": Path("/models/draft"),
+        },
     )
     monkeypatch.setattr(
         module, "llama_server_binary", lambda: ("llama-server", {"build": 9000})
@@ -97,6 +101,8 @@ def test_parallel_persists_one_paired_record_per_benchmark_run(
     manifest, rows, summary = _run_rows(tmp_path, "parallel")
     assert manifest["status"] == "completed"
     assert manifest["record_count"] == 2
+    assert manifest["models"]["main"]["catalog_key"] == "qwen3-14b-q4-k-m"
+    assert manifest["models"]["draft"]["catalog_key"] == "qwen3-1.7b-q8-0"
     assert len(rows) == 2
     assert set(rows[0]["model_calls"]) == {"main", "draft"}
     assert rows[0]["question"]["question"] == "question?"
@@ -245,6 +251,10 @@ def test_tooluse_persists_model_turns_queries_and_results(
     manifest, rows, summary = _run_rows(tmp_path, "tooluse")
     assert manifest["record_count"] == 2
     assert manifest["parameters"]["wikipedia"]["points_count"] == 123
+    assert manifest["parameters"]["agent_prompt"] == {
+        "text": tooluse.SYSTEM_PROMPT,
+        "sha256": hashlib.sha256(tooluse.SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+    }
     assert (
         manifest["parameters"]["retrieval"]["database_reset"]
         == "docker_restart_per_benchmark_unit"
@@ -332,19 +342,31 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
         def close(self):
             pass
 
-        def stream_completion(self, messages, generation, *, cancel_event=None):
+        def stream_completion(
+            self,
+            messages,
+            generation,
+            *,
+            cancel_event=None,
+            stop_after_complete_tool_call=False,
+        ):
             if messages == [
                 {"role": "user", "content": prefetched_toolcall.FIXED_LLM_WARMUP}
             ]:
                 return call(messages, content="warm")
             self.calls += 1
             if self.role == "main":
+                assert stop_after_complete_tool_call is False
                 if self.calls == 1:
                     assert draft_retrieved.wait(timeout=1)
                     return call(messages, query="same")
                 return call(messages, content="answer")
             if self.calls == 1:
-                return call(messages, query="same")
+                assert stop_after_complete_tool_call is True
+                value = call(messages, query="same")
+                value["client_stop_reason"] = "complete_tool_call"
+                return value
+            assert stop_after_complete_tool_call is True
             assert cancel_event is not None
             cancel_event.wait(timeout=1)
             return call(messages, cancelled=True)
@@ -386,7 +408,10 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
     monkeypatch.setattr(
         prefetched_toolcall,
         "require_models",
-        lambda: {"main": Path("/models/main"), "draft": Path("/models/draft")},
+        lambda model_specs=None: {
+            "main": Path("/models/main"),
+            "draft": Path("/models/draft"),
+        },
     )
     monkeypatch.setattr(
         prefetched_toolcall,
@@ -424,16 +449,34 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
     manifest, rows, summary = _run_rows(tmp_path, "prefetched-toolcall")
     assert manifest["status"] == "completed"
     assert manifest["parameters"]["target_model_role"] == "main"
+    assert manifest["parameters"]["agent_prompt"]["text"] == (
+        prefetched_toolcall.SYSTEM_PROMPT
+    )
+    assert manifest["parameters"]["agent_prompt"]["sha256"] == (
+        prefetched_toolcall.SYSTEM_PROMPT_SHA256
+    )
+    assert manifest["parameters"]["agent_prompt"]["sha256"] == hashlib.sha256(
+        manifest["parameters"]["agent_prompt"]["text"].encode("utf-8")
+    ).hexdigest()
+    assert (
+        manifest["parameters"]["draft_stream_stop"]
+        == "complete_valid_search_tool_call"
+    )
     assert manifest["parameters"]["retrieval"]["reset_included_in_end_to_end"] is False
     assert len(rows) == 1
     assert rows[0]["target_outcome"]["terminal_status"] == "final"
     assert rows[0]["sync_events"][1]["source"] == "target_retrieval"
     assert rows[0]["query_pairs"][0]["exact_warm_ready"] is True
     assert rows[0]["draft_attempts"][0]["retrieval_call"]["query"] == "same"
+    assert (
+        rows[0]["draft_attempts"][0]["model_call"]["client_stop_reason"]
+        == "complete_tool_call"
+    )
     assert summary["metrics"]["target_end_to_end_ms"]["count"] == 1
     assert (
         summary["metrics"]["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"]
         == 1
     )
+    assert summary["metrics"]["prefetch"]["draft_tool_call_early_stops"] == 1
     assert len(restarts) == 1
     assert len(databases) == 1

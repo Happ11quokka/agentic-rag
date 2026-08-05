@@ -77,12 +77,14 @@ def test_validate_model_checks_size_and_hash(
 ) -> None:
     content = b"model"
     spec = ModelSpec(
-        "test",
-        "repo",
-        "revision",
-        "model.gguf",
-        len(content),
-        hashlib.sha256(content).hexdigest(),
+        key="test",
+        label="Test model",
+        directory="test",
+        repo="repo",
+        revision="revision",
+        filename="model.gguf",
+        bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
     )
     monkeypatch.setattr(common, "MODELS_DIR", tmp_path)
     spec.path.parent.mkdir()
@@ -91,6 +93,31 @@ def test_validate_model_checks_size_and_hash(
     spec.path.write_bytes(b"bad")
     with pytest.raises(ExperimentError, match="size mismatch"):
         common.validate_model(spec)
+
+
+def test_model_selection_defaults_and_requires_both_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = common.default_model_specs()
+    assert selected["main"].key == "qwen3-14b-q4-k-m"
+    assert selected["draft"].key == "qwen3-1.7b-q8-0"
+
+    validated: list[str] = []
+    monkeypatch.setattr(
+        common,
+        "validate_model",
+        lambda spec: validated.append(spec.key) or spec.path,
+    )
+    common.require_models(
+        {
+            "main": common.MODEL_SPECS["qwen3-0.6b-q8-0"],
+            "draft": common.MODEL_SPECS["qwen3-14b-q4-k-m"],
+        }
+    )
+    assert validated == ["qwen3-0.6b-q8-0", "qwen3-14b-q4-k-m"]
+
+    with pytest.raises(ExperimentError, match="exactly main and draft"):
+        common.resolve_model_specs({})
 
 
 def test_reasoning_budget_is_optional_per_model_server(tmp_path) -> None:

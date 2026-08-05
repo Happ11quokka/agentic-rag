@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from typing import Any
 
 from agent.retrieval import TimedRetriever
-from agent.runner import AgentRunner, LlamaCppClient
+from agent.runner import (
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_SHA256,
+    AgentRunner,
+    LlamaCppClient,
+)
 from wikipedia.encoder import Encoder
 from wikipedia.qdrant import QdrantVectorDB
 
@@ -22,6 +27,7 @@ from .common import (
     RETRIEVAL_MAX_CHARS,
     RETRIEVAL_TOP_K,
     ExperimentError,
+    ModelSpec,
     ModelServer,
     Progress,
     format_metric,
@@ -31,6 +37,7 @@ from .common import (
     print_table,
     prompt_positive_int,
     require_models,
+    resolve_model_specs,
     require_restartable_qdrant,
     restart_qdrant,
     select_benchmark_questions,
@@ -285,11 +292,21 @@ def build_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
-def run(task_count: int, repetitions: int) -> None:
+def run(
+    task_count: int,
+    repetitions: int,
+    *,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> None:
+    selected_models = resolve_model_specs(model_specs)
     questions = select_benchmark_questions(task_count)
-    model_paths = require_models()
+    model_paths = require_models(selected_models)
     binary, version = llama_server_binary()
-    print(f"setup: llama.cpp build={version['build']}")
+    print(
+        f"setup: llama.cpp build={version['build']}; "
+        f"target={selected_models['main'].filename}, "
+        f"draft={selected_models['draft'].filename}"
+    )
     results = {role: _new_role_result() for role in ("main", "draft")}
 
     with prepare_wikipedia(require_idle=True) as environment:
@@ -307,11 +324,16 @@ def run(task_count: int, repetitions: int) -> None:
             task_count=task_count,
             repetitions=repetitions,
             questions=questions,
+            model_specs=selected_models,
             model_paths=model_paths,
             llama_cpp=version,
             generation=GENERATION,
             parameters={
                 "execution": "isolated non-overlapping model phases",
+                "agent_prompt": {
+                    "text": SYSTEM_PROMPT,
+                    "sha256": SYSTEM_PROMPT_SHA256,
+                },
                 "reasoning_budget_tokens": REASONING_BUDGET_TOKENS,
                 "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
                 "question_timeout_seconds": QUESTION_TIMEOUT_SECONDS,
@@ -412,11 +434,15 @@ def run(task_count: int, repetitions: int) -> None:
     render_report(results)
 
 
-def prompt_and_run(*, input_fn: Callable[[str], str] = input) -> None:
+def prompt_and_run(
+    *,
+    input_fn: Callable[[str], str] = input,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> None:
     task_count = prompt_positive_int(
         "FanOutQA task count", DEFAULT_TASKS, input_fn=input_fn
     )
     repetitions = prompt_positive_int(
         "Repetitions per task and model", DEFAULT_REPETITIONS, input_fn=input_fn
     )
-    run(task_count, repetitions)
+    run(task_count, repetitions, model_specs=model_specs)

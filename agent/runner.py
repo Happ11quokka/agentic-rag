@@ -19,20 +19,23 @@ from .retrieval import TimedRetriever, render_search_results
 SYSTEM_PROMPT = """Use thinking mode. /think
 
 Answer FanOutQA questions using semantic search over English Wikipedia.
-These questions require evidence from multiple Wikipedia articles.
 
-Maintain an internal coverage checklist. First identify the requested entity set
-or ranking, then create one atomic fact to verify for every entity. Tool results
-prove only facts they explicitly state; never fill missing facts from memory.
+At every assistant turn, inspect the original question and all previous search
+calls and results. Then choose exactly one action:
 
-After each result, call search for the next unverified checklist item. Each search
-must target exactly one entity and one missing attribute; never combine multiple
-people or items in one query. Give a final answer only after every requested item
-and attribute has explicit tool-result evidence. A top-five question normally
-needs one list search plus five entity searches. Do not repeat equivalent searches.
+- If any requested item or attribute lacks explicit evidence in the search
+  results, call search exactly once for the next missing atomic fact. Output no
+  answer text.
+- If every requested item and attribute has explicit evidence, output only the
+  final answer, preserving the requested list or mapping.
 
-When complete, answer only, preserving the requested list or mapping.
-Reference date for the question is 2023-11-20."""
+Never use memory to fill missing evidence. Never give a partial answer. Each
+search query must name exactly one entity and one missing attribute. For ranking
+or list questions, first verify the entity set, then verify the requested
+attribute for each entity. Do not repeat equivalent searches.
+
+Reference date: 2023-11-20."""
+SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 
 SEARCH_TOOL = {
     "type": "function",
@@ -84,6 +87,15 @@ def initial_messages(question: Question | str) -> list[dict[str, Any]]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": text},
     ]
+
+
+def tool_generation(generation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **generation,
+        "tools": [SEARCH_TOOL],
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
+    }
 
 
 def prompt_hash(messages: list[dict[str, Any]]) -> str:
@@ -213,6 +225,7 @@ class LlamaCppClient:
         generation: dict[str, Any],
         *,
         cancel_event: threading.Event | None = None,
+        stop_after_complete_tool_call: bool = False,
     ) -> dict[str, Any]:
         before = self.metrics()
         request_start = self.clock_ns()
@@ -225,6 +238,7 @@ class LlamaCppClient:
         extensions: dict[str, Any] = {}
         usage: dict[str, Any] = {}
         cancelled = False
+        client_stop_reason: str | None = None
         previous_ns = request_start
         payload = {
             "messages": messages,
@@ -281,6 +295,7 @@ class LlamaCppClient:
                         reasoning_parts.append(text)
                     else:
                         content_parts.append(text)
+                last_tool_fragment_ns: int | None = None
                 for fragment in delta.get("tool_calls") or []:
                     index = fragment.get("index")
                     if not isinstance(index, int) or index < 0:
@@ -311,6 +326,7 @@ class LlamaCppClient:
                         streamed_text += arguments
                     if streamed_text:
                         received = self.clock_ns()
+                        last_tool_fragment_ns = received
                         chunks.append(
                             {
                                 "sequence": len(chunks),
@@ -326,6 +342,14 @@ class LlamaCppClient:
                     finish_reason = value
                     if action_ready_ns is None:
                         action_ready_ns = self.clock_ns()
+                if (
+                    stop_after_complete_tool_call
+                    and last_tool_fragment_ns is not None
+                    and _is_complete_search_tool_call(content_parts, tool_call_parts)
+                ):
+                    action_ready_ns = last_tool_fragment_ns
+                    client_stop_reason = "complete_tool_call"
+                    break
         request_end = self.clock_ns()
         if (
             action_ready_ns is None
@@ -362,6 +386,8 @@ class LlamaCppClient:
             "response_extensions": extensions,
             "metrics_delta": metric_deltas(before, after),
         }
+        if stop_after_complete_tool_call:
+            call["client_stop_reason"] = client_stop_reason
         call["timing"] = summarize_llm_call(call)
         return call
 
@@ -387,12 +413,7 @@ class AgentRunner:
     ) -> None:
         self.llm = llm
         self.retriever = retriever
-        self.generation = {
-            **generation,
-            "tools": [SEARCH_TOOL],
-            "tool_choice": "auto",
-            "parallel_tool_calls": False,
-        }
+        self.generation = tool_generation(generation)
         self.max_searches = max_searches
         self.question_timeout_seconds = question_timeout_seconds
         self.clock_ns = clock_ns
@@ -510,6 +531,24 @@ def _parse_search_tool_call(call: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("search tool query must be a nonempty string")
     return identifier, query.strip()
+
+
+def _is_complete_search_tool_call(
+    content_parts: list[str], tool_call_parts: dict[int, dict[str, Any]]
+) -> bool:
+    if content_parts:
+        return False
+    call = {
+        "content": "",
+        "tool_calls": [
+            tool_call_parts[index] for index in sorted(tool_call_parts)
+        ],
+    }
+    try:
+        _parse_search_tool_call(call)
+    except ValueError:
+        return False
+    return True
 
 
 def summarize_question(

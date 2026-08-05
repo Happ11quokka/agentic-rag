@@ -6,8 +6,8 @@ from .common import MODEL_SPECS, ExperimentError, run_main, validate_model
 
 
 def download_models() -> None:
-    for role, spec in MODEL_SPECS.items():
-        print(f"{role}: downloading {spec.repo}/{spec.filename}", flush=True)
+    for spec in MODEL_SPECS.values():
+        print(f"{spec.key}: downloading {spec.repo}/{spec.filename}", flush=True)
         spec.path.parent.mkdir(parents=True, exist_ok=True)
         hf_hub_download(
             repo_id=spec.repo,
@@ -16,7 +16,7 @@ def download_models() -> None:
             local_dir=spec.path.parent,
         )
         path = validate_model(spec)
-        print(f"{role}: ready at {path}", flush=True)
+        print(f"{spec.key}: ready at {path}", flush=True)
 
 
 def main() -> None:

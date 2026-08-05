@@ -42,3 +42,6 @@ repro/setup/llama.cpp.build/
 fanoutqa/data/
 experiment/models/
 experiment/results/
+
+# Native scheduled inference build cache
+agent/scheduling/.build/

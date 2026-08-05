@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -12,15 +12,16 @@ from .common import (
     FIXED_LLM_WARMUP,
     GENERATION,
     MAIN_PORT,
-    MODEL_SPECS,
     REQUEST_TIMEOUT_SECONDS,
     ExperimentError,
+    ModelSpec,
     ModelServer,
     Progress,
     llama_server_binary,
     print_table,
     prompt_positive_int,
     require_models,
+    resolve_model_specs,
     select_benchmark_questions,
 )
 from .inference import (
@@ -57,13 +58,20 @@ def render_report(calls_by_role: dict[str, list[dict[str, Any]]]) -> None:
     )
 
 
-def run(task_count: int, repetitions: int) -> None:
+def run(
+    task_count: int,
+    repetitions: int,
+    *,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> None:
+    selected_models = resolve_model_specs(model_specs)
     questions = select_benchmark_questions(task_count)
-    model_paths = require_models()
+    model_paths = require_models(selected_models)
     binary, version = llama_server_binary()
     print(
         f"setup: llama.cpp build={version['build']}; "
-        f"models={MODEL_SPECS['main'].filename}, {MODEL_SPECS['draft'].filename}"
+        f"models={selected_models['main'].filename}, "
+        f"{selected_models['draft'].filename}"
     )
 
     ports = {"main": MAIN_PORT, "draft": DRAFT_PORT}
@@ -117,6 +125,7 @@ def run(task_count: int, repetitions: int) -> None:
         task_count=task_count,
         repetitions=repetitions,
         questions=questions,
+        model_specs=selected_models,
         model_paths=model_paths,
         llama_cpp=version,
         generation=GENERATION,
@@ -135,11 +144,15 @@ def run(task_count: int, repetitions: int) -> None:
     render_report(calls_by_role)
 
 
-def prompt_and_run(*, input_fn: Callable[[str], str] = input) -> None:
+def prompt_and_run(
+    *,
+    input_fn: Callable[[str], str] = input,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> None:
     task_count = prompt_positive_int(
         "FanOutQA task count", DEFAULT_TASKS, input_fn=input_fn
     )
     repetitions = prompt_positive_int(
         "Repetitions per task", DEFAULT_REPETITIONS, input_fn=input_fn
     )
-    run(task_count, repetitions)
+    run(task_count, repetitions, model_specs=model_specs)

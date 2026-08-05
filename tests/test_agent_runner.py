@@ -3,12 +3,16 @@ import threading
 from typing import Any
 
 import httpx
+import pytest
 
 from agent.runner import (
+    SYSTEM_PROMPT,
     AgentRunner,
     LlamaCppClient,
+    initial_messages,
     metric_deltas,
     summarize_llm_call,
+    tool_generation,
 )
 from fanoutqa.dataset import Question
 
@@ -119,6 +123,51 @@ class Clock:
     def __call__(self) -> int:
         self.now += 10_000_000
         return self.now
+
+
+def test_initial_messages_use_exact_shared_agent_prompt() -> None:
+    expected = """Use thinking mode. /think
+
+Answer FanOutQA questions using semantic search over English Wikipedia.
+
+At every assistant turn, inspect the original question and all previous search
+calls and results. Then choose exactly one action:
+
+- If any requested item or attribute lacks explicit evidence in the search
+  results, call search exactly once for the next missing atomic fact. Output no
+  answer text.
+- If every requested item and attribute has explicit evidence, output only the
+  final answer, preserving the requested list or mapping.
+
+Never use memory to fill missing evidence. Never give a partial answer. Each
+search query must name exactly one entity and one missing attribute. For ranking
+or list questions, first verify the entity set, then verify the requested
+attribute for each entity. Do not repeat equivalent searches.
+
+Reference date: 2023-11-20."""
+
+    assert SYSTEM_PROMPT == expected
+    assert initial_messages("question?") == [
+        {"role": "system", "content": expected},
+        {"role": "user", "content": "question?"},
+    ]
+
+
+def test_agent_runners_share_initial_messages_and_tool_generation() -> None:
+    clients = [LLM([call("answer")]), LLM([call("answer")])]
+    generation = {"seed": 42, "temperature": 0.6}
+
+    for client in clients:
+        AgentRunner(
+            client,
+            Retriever(),
+            generation=generation,
+            clock_ns=Clock(),
+        ).run(Question("id", "question?", ()))
+
+    assert clients[0].messages[0] == clients[1].messages[0]
+    assert clients[0].generations[0] == clients[1].generations[0]
+    assert clients[0].generations[0] == tool_generation(generation)
 
 
 def test_reasoning_not_added_to_history_and_search_limit_terminates() -> None:
@@ -257,6 +306,8 @@ def test_stream_reconstructs_native_tool_call_fragments() -> None:
     ]
     assert result["finish_reason"] == "tool_calls"
     assert result["usage"]["completion_tokens"] == 7
+    assert "client_stop_reason" not in result
+    assert "stop_after_complete_tool_call" not in result["request"]
     assert [item["channel"] for item in result["chunks"]] == [
         "reasoning",
         "tool_call",
@@ -266,6 +317,90 @@ def test_stream_reconstructs_native_tool_call_fragments() -> None:
     assert [item["received_ns"] for item in result["chunks"]] == sorted(
         item["received_ns"] for item in result["chunks"]
     )
+
+
+def test_stream_stops_only_when_fragmented_tool_arguments_become_valid() -> None:
+    body = "\n".join(
+        [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{"}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"query\\":\\"x\\"}"}}]}}]}',
+            'data: {"choices":[{"delta":{"content":"must not be consumed"}}]}',
+            'data: {"choices":[{"finish_reason":"tool_calls","delta":{}}]}',
+            'data: {"choices":[],"usage":{"completion_tokens":7}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(200, text="")
+        return httpx.Response(
+            200, text=body, headers={"content-type": "text/event-stream"}
+        )
+
+    llm = LlamaCppClient(
+        "http://test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock_ns=Clock(),
+    )
+    result = llm.stream_completion(
+        [{"role": "user", "content": "q"}],
+        {"seed": 42},
+        stop_after_complete_tool_call=True,
+    )
+
+    assert result["tool_calls"][0]["function"]["arguments"] == '{"query":"x"}'
+    assert result["content"] == ""
+    assert result["finish_reason"] is None
+    assert result["usage"] == {}
+    assert result["cancelled"] is False
+    assert result["client_stop_reason"] == "complete_tool_call"
+    assert result["action_ready_ns"] == result["chunks"][-1]["received_ns"]
+    assert "stop_after_complete_tool_call" not in result["request"]
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [
+        '{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\\"query\\":"}}]}',
+        '{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\\"query\\":}"}}]}',
+        '{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\\"query\\":\\"x\\"}"}},{"index":1,"id":"call_2","function":{"name":"search","arguments":"{\\"query\\":\\"y\\"}"}}]}',
+        '{"content":"answer","tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\\"query\\":\\"x\\"}"}}]}',
+    ],
+)
+def test_stream_does_not_early_stop_invalid_tool_call_shapes(delta: str) -> None:
+    body = "\n".join(
+        [
+            f'data: {{"choices":[{{"delta":{delta}}}]}}',
+            'data: {"choices":[{"finish_reason":"tool_calls","delta":{}}]}',
+            'data: {"choices":[],"usage":{"completion_tokens":7}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(200, text="")
+        return httpx.Response(
+            200, text=body, headers={"content-type": "text/event-stream"}
+        )
+
+    llm = LlamaCppClient(
+        "http://test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock_ns=Clock(),
+    )
+    result = llm.stream_completion(
+        [{"role": "user", "content": "q"}],
+        {},
+        stop_after_complete_tool_call=True,
+    )
+
+    assert result["client_stop_reason"] is None
+    assert result["finish_reason"] == "tool_calls"
+    assert result["usage"]["completion_tokens"] == 7
 
 
 def test_stream_can_be_cancelled_without_affecting_normal_call_shape() -> None:
@@ -284,9 +419,13 @@ def test_stream_can_be_cancelled_without_affecting_normal_call_shape() -> None:
     llm = LlamaCppClient("http://test", client=client, clock_ns=Clock())
 
     result = llm.stream_completion(
-        [{"role": "user", "content": "q"}], {}, cancel_event=cancel
+        [{"role": "user", "content": "q"}],
+        {},
+        cancel_event=cancel,
+        stop_after_complete_tool_call=True,
     )
 
     assert result["cancelled"] is True
+    assert result["client_stop_reason"] is None
     assert result["chunks"] == []
     assert result["action_ready_ns"] is None

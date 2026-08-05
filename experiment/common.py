@@ -60,7 +60,9 @@ class ExperimentError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ModelSpec:
-    role: str
+    key: str
+    label: str
+    directory: str
     repo: str
     revision: str
     filename: str
@@ -69,27 +71,70 @@ class ModelSpec:
 
     @property
     def path(self) -> Path:
-        return MODELS_DIR / self.role / self.filename
+        return MODELS_DIR / self.directory / self.filename
 
 
 MODEL_SPECS = {
-    "main": ModelSpec(
-        role="main",
+    "qwen3-14b-q4-k-m": ModelSpec(
+        key="qwen3-14b-q4-k-m",
+        label="Qwen3 14B Q4_K_M",
+        directory="main",
         repo="Qwen/Qwen3-14B-GGUF",
         revision="530227a7d994db8eca5ab5ced2fb692b614357fd",
         filename="Qwen3-14B-Q4_K_M.gguf",
         bytes=9_001_752_960,
         sha256="500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0",
     ),
-    "draft": ModelSpec(
-        role="draft",
+    "qwen3-4b-q4-k-m": ModelSpec(
+        key="qwen3-4b-q4-k-m",
+        label="Qwen3 4B Q4_K_M",
+        directory="draft",
         repo="Qwen/Qwen3-4B-GGUF",
         revision="bc640142c66e1fdd12af0bd68f40445458f3869b",
         filename="Qwen3-4B-Q4_K_M.gguf",
         bytes=2_497_280_256,
         sha256="7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
     ),
+    "qwen3-1.7b-q8-0": ModelSpec(
+        key="qwen3-1.7b-q8-0",
+        label="Qwen3 1.7B Q8_0",
+        directory="qwen3-1.7b",
+        repo="Qwen/Qwen3-1.7B-GGUF",
+        revision="90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+        filename="Qwen3-1.7B-Q8_0.gguf",
+        bytes=1_834_426_016,
+        sha256="061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+    ),
+    "qwen3-0.6b-q8-0": ModelSpec(
+        key="qwen3-0.6b-q8-0",
+        label="Qwen3 0.6B Q8_0",
+        directory="qwen3-0.6b",
+        repo="Qwen/Qwen3-0.6B-GGUF",
+        revision="23749fefcc72300e3a2ad315e1317431b06b590a",
+        filename="Qwen3-0.6B-Q8_0.gguf",
+        bytes=639_446_688,
+        sha256="9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+    ),
 }
+
+DEFAULT_MODEL_KEYS = {
+    "main": "qwen3-14b-q4-k-m",
+    "draft": "qwen3-1.7b-q8-0",
+}
+MODEL_ROLES = frozenset(DEFAULT_MODEL_KEYS)
+
+
+def default_model_specs() -> dict[str, ModelSpec]:
+    return {role: MODEL_SPECS[key] for role, key in DEFAULT_MODEL_KEYS.items()}
+
+
+def resolve_model_specs(
+    model_specs: Mapping[str, ModelSpec] | None,
+) -> dict[str, ModelSpec]:
+    selected = default_model_specs() if model_specs is None else dict(model_specs)
+    if set(selected) != MODEL_ROLES:
+        raise ExperimentError("model selection must contain exactly main and draft")
+    return selected
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,30 +347,34 @@ def validate_model(spec: ModelSpec, *, hash_file: bool = True) -> Path:
     path = spec.path
     if not path.is_file():
         raise ExperimentError(
-            f"{spec.role} model is missing: {path}\n"
+            f"{spec.label} model is missing: {path}\n"
             "Prepare it with `uv run download-models`, then retry."
         )
     actual_size = path.stat().st_size
     if actual_size != spec.bytes:
         raise ExperimentError(
-            f"{spec.role} model size mismatch at {path}: got {actual_size}; "
+            f"{spec.label} model size mismatch at {path}: got {actual_size}; "
             f"expected {spec.bytes}. Remove the bad file and run `uv run download-models`."
         )
     if hash_file:
         actual_sha = sha256_file(path)
         if actual_sha != spec.sha256:
             raise ExperimentError(
-                f"{spec.role} model checksum mismatch at {path}: got {actual_sha}; "
+                f"{spec.label} model checksum mismatch at {path}: got {actual_sha}; "
                 f"expected {spec.sha256}. Remove the bad file and run `uv run download-models`."
             )
     return path.resolve()
 
 
-def require_models(roles: Iterable[str] = ("main", "draft")) -> dict[str, Path]:
+def require_models(
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> dict[str, Path]:
+    selected = resolve_model_specs(model_specs)
     paths: dict[str, Path] = {}
-    for role in roles:
-        print(f"setup: validating {role} model", flush=True)
-        paths[role] = validate_model(MODEL_SPECS[role])
+    for role in ("main", "draft"):
+        spec = selected[role]
+        print(f"setup: validating {role} model ({spec.label})", flush=True)
+        paths[role] = validate_model(spec)
     return paths
 
 

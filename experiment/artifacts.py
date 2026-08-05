@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -12,7 +13,7 @@ from uuid import uuid4
 
 from fanoutqa.dataset import DEV_GIT_BLOB_SHA1, DEV_REVISION, Question
 
-from .common import MODEL_SPECS, ROOT, SEED
+from .common import ROOT, SEED, ModelSpec
 
 SCHEMA_VERSION = 1
 RESULTS_DIR = ROOT / "experiment" / "results"
@@ -66,6 +67,7 @@ def run_metadata(
     task_count: int,
     repetitions: int,
     questions: list[Question],
+    model_specs: Mapping[str, ModelSpec],
     model_paths: dict[str, Path],
     llama_cpp: dict[str, Any],
     generation: dict[str, Any],
@@ -84,11 +86,13 @@ def run_metadata(
         "generation": generation,
         "models": {
             role: {
-                "repo": MODEL_SPECS[role].repo,
-                "revision": MODEL_SPECS[role].revision,
-                "filename": MODEL_SPECS[role].filename,
-                "bytes": MODEL_SPECS[role].bytes,
-                "sha256": MODEL_SPECS[role].sha256,
+                "catalog_key": model_specs[role].key,
+                "label": model_specs[role].label,
+                "repo": model_specs[role].repo,
+                "revision": model_specs[role].revision,
+                "filename": model_specs[role].filename,
+                "bytes": model_specs[role].bytes,
+                "sha256": model_specs[role].sha256,
                 "path": str(path),
             }
             for role, path in model_paths.items()

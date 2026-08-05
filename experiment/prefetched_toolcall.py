@@ -4,7 +4,7 @@ import hashlib
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict
@@ -14,12 +14,14 @@ import httpx
 
 from agent.retrieval import TimedRetriever
 from agent.runner import (
-    SEARCH_TOOL,
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_SHA256,
     AgentRunner,
     LlamaCppClient,
     _parse_search_tool_call,
     initial_messages,
     prompt_hash,
+    tool_generation,
 )
 from wikipedia.encoder import Encoder
 from wikipedia.qdrant import QdrantVectorDB
@@ -32,11 +34,11 @@ from .common import (
     GENERATION,
     MAIN_PORT,
     MAX_SEARCHES,
-    MODEL_SPECS,
     REQUEST_TIMEOUT_SECONDS,
     RETRIEVAL_MAX_CHARS,
     RETRIEVAL_TOP_K,
     ExperimentError,
+    ModelSpec,
     ModelServer,
     Progress,
     format_metric,
@@ -46,6 +48,7 @@ from .common import (
     print_table,
     prompt_positive_int,
     require_models,
+    resolve_model_specs,
     require_restartable_qdrant,
     restart_qdrant,
     select_benchmark_questions,
@@ -63,15 +66,6 @@ from .tooluse import (
 DESCRIPTION = "Measure synchronized draft query prefetch latency"
 
 
-def _draft_generation(generation: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **generation,
-        "tools": [SEARCH_TOOL],
-        "tool_choice": "auto",
-        "parallel_tool_calls": False,
-    }
-
-
 class DraftCoordinator:
     """Run one draft query for each latest target transcript snapshot."""
 
@@ -86,7 +80,7 @@ class DraftCoordinator:
     ) -> None:
         self.client = client
         self.retriever = retriever
-        self.generation = _draft_generation(generation)
+        self.generation = tool_generation(generation)
         self.start_barrier = start_barrier
         self.clock_ns = clock_ns
         self.condition = threading.Condition()
@@ -218,7 +212,10 @@ class DraftCoordinator:
             return attempt
         try:
             call = self.client.stream_completion(
-                snapshot["messages"], self.generation, cancel_event=cancel
+                snapshot["messages"],
+                self.generation,
+                cancel_event=cancel,
+                stop_after_complete_tool_call=True,
             )
         except httpx.TimeoutException as exc:
             attempt.update(status="timeout", error=str(exc))
@@ -429,6 +426,7 @@ def _new_results() -> dict[str, Any]:
         "target_qdrant_exact_warm": [],
         "target_qdrant_other": [],
         "cancelled_draft_generations": 0,
+        "draft_tool_call_early_stops": 0,
         "stale_draft_queries": 0,
     }
 
@@ -481,6 +479,8 @@ def record_result(results: dict[str, Any], result: dict[str, Any]) -> None:
         if call:
             if call.get("cancelled"):
                 results["cancelled_draft_generations"] += 1
+            if call.get("client_stop_reason") == "complete_tool_call":
+                results["draft_tool_call_early_stops"] += 1
             _append_call_metrics(results["llm"]["draft"], call)
             delay = (
                 call["request_start_ns"] - attempt["sync_published_ns"]
@@ -573,6 +573,9 @@ def build_summary(results: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "target_qdrant_ms_other": _stats(results["target_qdrant_other"]),
                 "cancelled_draft_generations": results["cancelled_draft_generations"],
+                "draft_tool_call_early_stops": results[
+                    "draft_tool_call_early_stops"
+                ],
                 "stale_draft_queries": results["stale_draft_queries"],
             },
         },
@@ -677,6 +680,7 @@ def render_report(results: dict[str, Any]) -> None:
                 _format_percent(prefetch["exact_warm_ready_rate"]),
             ],
             ["cancelled draft generations", prefetch["cancelled_draft_generations"]],
+            ["draft tool-call early stops", prefetch["draft_tool_call_early_stops"]],
             ["stale draft queries", prefetch["stale_draft_queries"]],
         ],
     )
@@ -726,13 +730,20 @@ def _format_percent(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.2f}"
 
 
-def run(task_count: int, repetitions: int) -> None:
+def run(
+    task_count: int,
+    repetitions: int,
+    *,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> None:
+    selected_models = resolve_model_specs(model_specs)
     questions = select_benchmark_questions(task_count)
-    model_paths = require_models()
+    model_paths = require_models(selected_models)
     binary, version = llama_server_binary()
     print(
         f"setup: llama.cpp build={version['build']}; "
-        f"target={MODEL_SPECS['main'].filename}, draft={MODEL_SPECS['draft'].filename}"
+        f"target={selected_models['main'].filename}, "
+        f"draft={selected_models['draft'].filename}"
     )
     results = _new_results()
 
@@ -751,6 +762,7 @@ def run(task_count: int, repetitions: int) -> None:
             task_count=task_count,
             repetitions=repetitions,
             questions=questions,
+            model_specs=selected_models,
             model_paths=model_paths,
             llama_cpp=version,
             generation=GENERATION,
@@ -759,6 +771,11 @@ def run(task_count: int, repetitions: int) -> None:
                 "target_model_role": "main",
                 "sync_policy": "strict latest-state after target retrieval",
                 "draft_depth": 1,
+                "agent_prompt": {
+                    "text": SYSTEM_PROMPT,
+                    "sha256": SYSTEM_PROMPT_SHA256,
+                },
+                "draft_stream_stop": "complete_valid_search_tool_call",
                 "reasoning_budget_tokens": REASONING_BUDGET_TOKENS,
                 "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
                 "question_timeout_seconds": QUESTION_TIMEOUT_SECONDS,
@@ -869,11 +886,15 @@ def run(task_count: int, repetitions: int) -> None:
     render_report(results)
 
 
-def prompt_and_run(*, input_fn: Callable[[str], str] = input) -> None:
+def prompt_and_run(
+    *,
+    input_fn: Callable[[str], str] = input,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+) -> None:
     task_count = prompt_positive_int(
         "FanOutQA task count", DEFAULT_TASKS, input_fn=input_fn
     )
     repetitions = prompt_positive_int(
         "Repetitions per task", DEFAULT_REPETITIONS, input_fn=input_fn
     )
-    run(task_count, repetitions)
+    run(task_count, repetitions, model_specs=model_specs)
