@@ -310,6 +310,8 @@ def test_ensure_qdrant_reuses_running_container(
     monkeypatch.setattr(qdrant_runtime, "_url_ready", lambda url: True)
     monkeypatch.setattr(qdrant_runtime.shutil, "which", lambda command: "docker")
     monkeypatch.setattr(qdrant_runtime, "_docker", fake_docker)
+    monkeypatch.setattr(qdrant_runtime, "_ensure_docker", lambda: None)
+    monkeypatch.setattr(qdrant_runtime, "_ensure_compatible_storage", lambda path: None)
 
     assert (
         qdrant_runtime.ensure_qdrant(
@@ -336,6 +338,8 @@ def test_ensure_qdrant_creates_bind_mount(
         qdrant_runtime.shutil, "which", lambda command: "/usr/local/bin/docker"
     )
     monkeypatch.setattr(qdrant_runtime, "_docker", fake_docker)
+    monkeypatch.setattr(qdrant_runtime, "_ensure_docker", lambda: None)
+    monkeypatch.setattr(qdrant_runtime, "_ensure_compatible_storage", lambda path: None)
 
     storage = tmp_path / "qdrant"
     assert (

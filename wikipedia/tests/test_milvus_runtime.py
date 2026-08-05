@@ -36,19 +36,23 @@ def test_compose_file_mmaps_field_data_instead_of_loading_it_into_memory() -> No
     assert 'QUERYNODE_MMAP_VECTORINDEX: "true"' in rendered
 
 
-def test_compose_file_shrinks_the_diskann_search_cache() -> None:
-    """DiskANN's node cache defaults to 10% of raw data — 4.1 GB at 10M rows.
+def test_compose_file_pins_the_diskann_search_cache_as_a_controlled_parameter() -> None:
+    """The node cache decides how much of a search reaches the disk under test.
 
-    With mmap on, the 10M load still peaked at 25.3 GB of the 28 GB VM and was
-    refused at 31.1 GB predicted. Shrinking the cache both closes that gap and
-    strengthens the treatment: a smaller RAM cache means more reads reach the
-    disk under test. Record it as a controlled parameter — any comparison arm
-    has to use the same value.
+    It is pinned rather than left implicit because any comparison arm has to use
+    the same value; a baseline with a different cache is measuring a different
+    system. It sits at the Milvus default: an aggressively small cache forces
+    reads a real deployment would not make, which is the same objection that
+    ruled out Qdrant-HNSW here, and in practice it kept the USB HDD saturated
+    until Docker Desktop's file-sharing watchdog killed the engine.
     """
     rendered = milvus_runtime.compose_file()
 
-    assert f'COMMON_DISKINDEX_SEARCHCACHEBUDGETGBRATIO: "{milvus_runtime.DEFAULT_SEARCH_CACHE_RATIO}"' in rendered
-    assert milvus_runtime.DEFAULT_SEARCH_CACHE_RATIO < 0.1
+    assert (
+        f'COMMON_DISKINDEX_SEARCHCACHEBUDGETGBRATIO: "{milvus_runtime.DEFAULT_SEARCH_CACHE_RATIO}"'
+        in rendered
+    )
+    assert milvus_runtime.DEFAULT_SEARCH_CACHE_RATIO == 0.10
 
 
 def test_compose_file_probes_minio_with_a_binary_the_image_ships() -> None:

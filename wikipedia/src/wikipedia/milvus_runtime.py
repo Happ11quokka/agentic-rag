@@ -66,11 +66,21 @@ DEFAULT_CHANNEL_TASK_TIMEOUT = 600_000
 DEFAULT_OVERLOADED_MEMORY_PERCENT = 95
 
 # DiskANN caches hot graph nodes in RAM, defaulting to 10% of the raw vector
-# bytes — 4.1 GB for 10M 1024-d float32 rows. That was enough to push the load
-# past the query node's limit even with every field mmap'd. Shrinking it also
-# sharpens the experiment: fewer cached nodes means more of the search reaches
-# the storage medium under test.
-DEFAULT_SEARCH_CACHE_RATIO = 0.01
+# bytes -- 4.1 GB for 10M 1024-d float32 rows.
+#
+# This was 0.01 to force nearly every read to the disk under test. That is not
+# a configuration anyone runs, and it is what this project rejected Qdrant-HNSW
+# for: measuring a setup no real system uses. It also had a concrete cost --
+# with almost nothing cached, sustained random reads kept the USB HDD queue
+# saturated until Docker Desktop's file-sharing watchdog fired
+# ("service fs failed: injecting event blocked for 60s") and took the engine
+# down mid-experiment, six times.
+#
+# Back to the Milvus default. The medium under test is unchanged; what changes
+# is that the index is allowed the cache a real deployment would give it.
+# Latency measured at 0.01 (10M: cold 386 s, median 295 s) is a different
+# configuration and is not comparable to numbers taken from here.
+DEFAULT_SEARCH_CACHE_RATIO = 0.10
 
 # No container memory limit is set, because none helps.
 #
