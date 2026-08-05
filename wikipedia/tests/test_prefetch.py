@@ -117,14 +117,35 @@ def test_a_correct_prediction_is_served_without_searching_again() -> None:
     assert second == search_text(FakeDatabase(), FakeEncoder(), "borealis", limit=2)
 
 
-def test_a_prediction_matches_regardless_of_case_and_spacing() -> None:
+def test_a_prediction_that_differs_only_in_case_is_not_served() -> None:
+    """The prefetch embedded the string it predicted, not the one the agent issued.
+
+    "Aurora  Borealis" and "aurora borealis" normalize to the same cache key, but
+    the encoder is case- and whitespace-sensitive, so the vectors differ and the
+    passages may too. Serving that as a hit would silently break the guarantee
+    that prefetch cannot change what retrieval returns.
+    """
     database, encoder = FakeDatabase(), FakeEncoder()
     predictor = ScriptedPredictor("Aurora  Borealis")
     state = AgentState(question="Q")
 
-    with PrefetchingRetriever(database, encoder, predictor=predictor) as retriever:
+    with PrefetchingRetriever(database, encoder, predictor=predictor, limit=2) as retriever:
         first = retriever.retrieve("aurora", state)
         _await_search(database, "Aurora  Borealis")
+        second = retriever.retrieve("aurora borealis", state.extend("aurora", first))
+
+    assert retriever.stats.hits == 0
+    assert second == search_text(FakeDatabase(), FakeEncoder(), "aurora borealis", limit=2)
+
+
+def test_an_exactly_equal_prediction_is_served() -> None:
+    database, encoder = FakeDatabase(), FakeEncoder()
+    predictor = ScriptedPredictor("aurora borealis")
+    state = AgentState(question="Q")
+
+    with PrefetchingRetriever(database, encoder, predictor=predictor) as retriever:
+        first = retriever.retrieve("aurora", state)
+        _await_search(database, "aurora borealis")
         retriever.retrieve("aurora borealis", state.extend("aurora", first))
 
     assert retriever.stats.hits == 1

@@ -80,6 +80,10 @@ class PrefetchEntry:
     """One speculative search: reserved before it starts, filled when it ends."""
 
     key: str
+    # The exact string the prefetch embedded. The key is normalized so near-
+    # identical predictions do not each start their own search, but the encoder
+    # is case- and whitespace-sensitive, so only the raw string may be served.
+    query: str
     started: float
     done: threading.Event
     results: list[SearchResult] | None = None
@@ -105,7 +109,7 @@ class PrefetchCache:
         self._lock = threading.Lock()
         self._entries: dict[str, PrefetchEntry] = {}
 
-    def reserve(self, key: str) -> PrefetchEntry | None:
+    def reserve(self, key: str, query: str) -> PrefetchEntry | None:
         """Claim `key`, or return None if it is already cached or in flight.
 
         Reserving before the search starts is what lets a target that arrives
@@ -115,7 +119,10 @@ class PrefetchCache:
             if key in self._entries:
                 return None
             entry = PrefetchEntry(
-                key=key, started=time.perf_counter(), done=threading.Event()
+                key=key,
+                query=query,
+                started=time.perf_counter(),
+                done=threading.Event(),
             )
             self._entries[key] = entry
             return entry
@@ -185,15 +192,21 @@ class PrefetchingRetriever:
     def retrieve(self, query: str, state: AgentState) -> list[SearchResult]:
         """Answer `query`, then sync the resulting state to the drafter."""
         key = normalize_query(query)
-        results = self._take_prefetched(key)
+        results = self._take_prefetched(key, query)
         if results is None:
             results = self._search_now(query)
         self._sync(state.extend(query, results), answered=key)
         return results
 
-    def _take_prefetched(self, key: str) -> list[SearchResult] | None:
+    def _take_prefetched(self, key: str, query: str) -> list[SearchResult] | None:
         entry = self.cache.get(key)
         if entry is None:
+            return None
+        if entry.query != query:
+            # Same cache key, different string. The prefetch embedded its own
+            # wording, so its passages are not necessarily the ones this query
+            # would return -- serving them would change the answer, which is the
+            # one thing prefetch is not allowed to do.
             return None
         started = time.perf_counter()
         completed = entry.done.wait(timeout=self.wait_timeout)
@@ -256,7 +269,7 @@ class PrefetchingRetriever:
             # Caching the query just answered would post a hit no drafter
             # earned and would spend the disk twice on one retrieval.
             return
-        entry = self.cache.reserve(key)
+        entry = self.cache.reserve(key, predicted)
         if entry is None:
             return
         try:

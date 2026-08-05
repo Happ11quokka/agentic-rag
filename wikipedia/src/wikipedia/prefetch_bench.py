@@ -125,8 +125,10 @@ def arm_order(index: int) -> tuple[str, str]:
     """Which arm runs first for episode `index`.
 
     Alternating matters on an on-disk index: whichever arm runs second inherits
-    a page cache the first one warmed. Fixing the order would hand that
-    advantage to the same arm every episode.
+    a page cache the first one warmed. Alternating does not remove that
+    advantage -- the second arm always gets it -- it stops the advantage
+    accruing to the same arm every episode. With an odd episode count the
+    balance is imperfect by one episode, so report the count.
     """
     return (ARMS[1], ARMS[0]) if index % 2 else ARMS
 
@@ -186,10 +188,13 @@ def run_episode(
 
 
 def compare_arms(baseline: ArmResult, prefetch: ArmResult) -> Comparison:
-    """Check the two arms returned the same passages, and price the difference.
+    """Compare what the two arms returned, and price the difference.
 
     Divergence is a bug signal, not a result: prefetch is only ever allowed to
-    change when a search happens.
+    change when a search happens. It is reported rather than raised, so a run
+    still produces its numbers alongside the warning. The comparison is over
+    passage ids, so it would not catch a change in score or in passage text at
+    the same id.
     """
     divergent = tuple(
         left.query
