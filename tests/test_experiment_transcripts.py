@@ -142,6 +142,7 @@ def test_tooluse_persists_model_turns_queries_and_results(
         manifest={
             "dataset": {"resolved_revision": "dataset-revision"},
             "model": {"resolved_revision": "model-revision"},
+            "qdrant": {"collection": "wikipedia", "container": "wikipedia-qdrant"},
         },
         points_count=123,
         incomplete=False,
@@ -167,7 +168,7 @@ def test_tooluse_persists_model_turns_queries_and_results(
             retrieval = {
                 "query": query,
                 "encode_duration_ms": 1.0,
-                "qdrant_duration_ms": 2.0,
+                "search_duration_ms": 2.0,
                 "results": [
                     {
                         "rank": 1,
@@ -236,9 +237,9 @@ def test_tooluse_persists_model_turns_queries_and_results(
         yield database
 
     monkeypatch.setattr(
-        tooluse, "restart_qdrant", lambda selected: restarts.append(selected)
+        tooluse, "reset_vector_cache", lambda selected: restarts.append(selected)
     )
-    monkeypatch.setattr(tooluse, "QdrantVectorDB", fresh_database)
+    monkeypatch.setattr(tooluse, "open_database", fresh_database)
 
     tooluse.run(1, 1)
 
@@ -257,7 +258,7 @@ def test_tooluse_persists_model_turns_queries_and_results(
     assert summary["roles"]["main"]["valid_metrics"]["queries_per_run"]["count"] == 1
     assert summary["roles"]["main"]["valid_metrics"]["end_to_end_ms"]["mean"] == 10
     assert (
-        summary["roles"]["main"]["retrieval_metrics"]["qdrant_duration_ms"][
+        summary["roles"]["main"]["retrieval_metrics"]["search_duration_ms"][
             "mean"
         ]
         == 2
@@ -280,7 +281,11 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
                 url="http://localhost:6333",
             )
         ),
-        manifest={"dataset": {}, "model": {}},
+        manifest={
+            "dataset": {},
+            "model": {},
+            "qdrant": {"collection": "wikipedia", "container": "wikipedia-qdrant"},
+        },
         points_count=123,
         incomplete=False,
     )
@@ -364,9 +369,9 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
                 "encode_start_ns": start - 2_000_000,
                 "encode_end_ns": start,
                 "encode_duration_ms": 2.0,
-                "qdrant_start_ns": start,
-                "qdrant_end_ns": end,
-                "qdrant_duration_ms": 10.0,
+                "search_start_ns": start,
+                "search_end_ns": end,
+                "search_duration_ms": 10.0,
                 "results": [
                     {
                         "rank": 1,
@@ -414,10 +419,10 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
 
     monkeypatch.setattr(
         prefetched_toolcall,
-        "restart_qdrant",
+        "reset_vector_cache",
         lambda selected: restarts.append(selected),
     )
-    monkeypatch.setattr(prefetched_toolcall, "QdrantVectorDB", fresh_database)
+    monkeypatch.setattr(prefetched_toolcall, "open_database", fresh_database)
 
     prefetched_toolcall.run(1, 1)
 
@@ -432,7 +437,7 @@ def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
     assert rows[0]["draft_attempts"][0]["retrieval_call"]["query"] == "same"
     assert summary["metrics"]["target_end_to_end_ms"]["count"] == 1
     assert (
-        summary["metrics"]["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"]
+        summary["metrics"]["retrieval_by_role"]["draft"]["search_duration_ms"]["count"]
         == 1
     )
     assert len(restarts) == 1

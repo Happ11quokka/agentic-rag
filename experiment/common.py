@@ -22,6 +22,15 @@ import httpx
 from fanoutqa.dataset import Question, load_dev, select_questions
 from wikipedia.bundle import BundleError, BundlePaths, load_manifest
 from wikipedia.download import model_is_downloaded
+from wikipedia.milvus import MilvusConfig, MilvusVectorDB
+from wikipedia.milvus_runtime import (
+    DEFAULT_MILVUS_IMAGE,
+    DEFAULT_MILVUS_PROJECT,
+    DEFAULT_MILVUS_URI,
+    drop_page_cache,
+    ensure_milvus,
+    vm_memory_mb,
+)
 from wikipedia.qdrant import QdrantConfig, QdrantVectorDB
 from wikipedia.qdrant_runtime import DEFAULT_QDRANT_URL, ensure_qdrant
 
@@ -539,6 +548,76 @@ class WikipediaEnvironment(AbstractContextManager["WikipediaEnvironment"]):
         self.database.close()
 
 
+def require_resettable(environment: WikipediaEnvironment) -> None:
+    """Fail before a long run if cold state cannot be produced.
+
+    Checked up front rather than at the first reset, because these experiments
+    run for hours and a cold-start mechanism that does not work turns every
+    "non-hit" number into a warm one without saying so.
+    """
+    if backend_name(environment) == "milvus":
+        if vm_memory_mb() is None:
+            raise ExperimentError(
+                "cold measurement needs a privileged Docker run to drop the host "
+                "page cache, and that is not available"
+            )
+        return
+    require_restartable_qdrant(environment)
+
+
+def backend_name(environment: WikipediaEnvironment) -> str:
+    """Which vector database this bundle was ingested into."""
+    manifest = environment.manifest
+    for name in ("milvus", "qdrant"):
+        if isinstance(manifest.get(name), dict):
+            return name
+    raise ExperimentError(
+        "bundle manifest declares no vector database; prepare one with "
+        "`uv run wikipedia-ingest milvus --bundle-dir /absolute/path`"
+    )
+
+
+def open_database(environment: WikipediaEnvironment) -> Any:
+    """A fresh client of whichever backend the bundle declares.
+
+    Each benchmark unit opens its own client so no client-side state carries
+    across units.
+    """
+    if backend_name(environment) == "milvus":
+        return MilvusVectorDB(environment.database.config)
+    return QdrantVectorDB(environment.database.config)
+
+
+def reset_vector_cache(
+    environment: WikipediaEnvironment, collection: str | None = None
+) -> None:
+    """Make the next query cold.
+
+    The two backends need opposite treatment. Qdrant keeps its caches in the
+    process, so restarting the container is both correct and cheap.
+
+    Milvus must not be restarted. It treats local storage as a cache it owns and
+    empties it at startup, then re-fetches the DiskANN index from object storage
+    -- measured at roughly five hours for the 10M collection, on the same disk
+    the experiment is timing. Restarting per question is not a way to measure a
+    cold cache, it is a way never to finish. What actually holds a warm DiskANN
+    index is the host page cache, because Knowhere reads the index with pread
+    rather than mmap, so dropping that cache is the equivalent operation.
+
+    It is a weaker reset than a restart: Milvus's own in-process node cache
+    (common.diskIndex.searchCacheBudgetGBRatio) survives it. Report cold Milvus
+    numbers with that caveat rather than as process-fresh.
+    """
+    if backend_name(environment) == "milvus":
+        if not drop_page_cache():
+            raise ExperimentError(
+                "could not drop the host page cache, so the next query would be "
+                "served warm; a cold measurement needs a privileged Docker run"
+            )
+        return
+    restart_qdrant(environment, collection)
+
+
 def require_restartable_qdrant(environment: WikipediaEnvironment) -> None:
     url = environment.database.config.url or ""
     if url.rstrip("/") != DEFAULT_QDRANT_URL:
@@ -628,11 +707,66 @@ def prepare_wikipedia(
             f"BGE-M3 model is incomplete under {paths.model_dir}. Resume preparation with "
             "`uv run wikipedia-ingest qdrant`."
         )
+    if isinstance(manifest.get("milvus"), dict):
+        database = _open_milvus_bundle(manifest["milvus"])
+    else:
+        database = _open_qdrant_bundle(manifest)
+    return _finish_environment(
+        paths, manifest, database, require_idle, stability_seconds
+    )
+
+
+def _open_milvus_bundle(saved: dict[str, Any]) -> Any:
+    uri = str(saved.get("uri") or DEFAULT_MILVUS_URI)
+    try:
+        runtime = ensure_milvus(
+            uri,
+            storage_dir=saved.get("storage_dir"),
+            project=str(saved.get("project", DEFAULT_MILVUS_PROJECT)),
+            image=str(saved.get("image", DEFAULT_MILVUS_IMAGE)),
+            etcd_dir=saved.get("etcd_dir"),
+        )
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise ExperimentError(f"Milvus preparation failed: {exc}") from exc
+    print(f"setup: Milvus {runtime} at {uri}", flush=True)
+    collection = str(saved.get("collection", ""))
+    config = MilvusConfig(
+        uri=uri,
+        token=os.environ.get("MILVUS_TOKEN"),
+        database=str(saved.get("database", "default")),
+        collection_name=collection,
+        index_type=str(saved.get("index_type", "DISKANN")),
+        search_params={"search_list": int(saved.get("search_list", 100))},
+        timeout=float(saved.get("timeout", 60.0)),
+    )
+    database = MilvusVectorDB(config)
+    try:
+        if not database.client.has_collection(collection, timeout=config.timeout):
+            raise ExperimentError(f"Milvus collection is absent: {collection}")
+        state = database.index_state()
+        uncovered = state["total_rows"] - state["indexed_rows"]
+        if state["total_rows"] < 1:
+            raise ExperimentError(f"Milvus collection is empty: {collection}")
+        if uncovered > 0:
+            # Segments without an index are answered by brute-force scan, which
+            # is a different system from the one being measured.
+            raise ExperimentError(
+                f"{uncovered:,} of {state['total_rows']:,} rows are not covered by "
+                f"the index in {collection}; those segments are answered by "
+                "brute-force scan, so the measurement would not be of DiskANN"
+            )
+    except BaseException:
+        database.close()
+        raise
+    return database
+
+
+def _open_qdrant_bundle(manifest: dict[str, Any]) -> Any:
     saved = manifest.get("qdrant")
     if not isinstance(saved, dict):
         raise ExperimentError(
-            "Wikipedia manifest has no Qdrant configuration. Prepare it with "
-            "`uv run wikipedia-ingest qdrant`."
+            "Wikipedia manifest declares no vector database. Prepare one with "
+            "`uv run wikipedia-ingest milvus --bundle-dir /absolute/path`."
         )
     url = str(saved.get("url") or DEFAULT_QDRANT_URL)
     try:
@@ -660,11 +794,40 @@ def prepare_wikipedia(
             raise ExperimentError(
                 f"Qdrant collection is absent: {config.collection_name}"
             )
-        first_count = _collection_points(database)
+    except BaseException:
+        database.close()
+        raise
+    return database
+
+
+def _points_count(database: Any) -> int:
+    """How many vectors are searchable, whichever backend this is."""
+    if isinstance(database, MilvusVectorDB):
+        count = database.index_state()["total_rows"]
+    else:
+        info = database.client.get_collection(database.config.collection_name)
+        count = getattr(info, "points_count", None)
+    if not isinstance(count, int) or count < 1:
+        raise ExperimentError(
+            f"vector collection is empty: {database.config.collection_name}"
+        )
+    return count
+
+
+def _finish_environment(
+    paths: BundlePaths,
+    manifest: dict[str, Any],
+    database: Any,
+    require_idle: bool,
+    stability_seconds: float,
+) -> WikipediaEnvironment:
+    """Refuse to measure a collection that is still being written to."""
+    try:
+        first_count = _points_count(database)
         active = _local_ingestion_processes() if require_idle else []
         if require_idle and not active and stability_seconds > 0:
             time.sleep(stability_seconds)
-            second_count = _collection_points(database)
+            second_count = _points_count(database)
             if second_count != first_count:
                 active = [
                     f"point count changed from {first_count:,} to {second_count:,}"
@@ -680,6 +843,7 @@ def prepare_wikipedia(
         raise
     incomplete = manifest.get("status") != "complete"
     if incomplete:
+        saved = manifest.get("milvus") or manifest.get("qdrant") or {}
         completed = "unknown"
         checkpoint_path = saved.get("checkpoint")
         if checkpoint_path and Path(str(checkpoint_path)).is_file():

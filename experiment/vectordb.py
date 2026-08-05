@@ -5,47 +5,46 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from wikipedia.encoder import Encoder
-from wikipedia.qdrant import QdrantVectorDB
-from wikipedia.qdrant_runtime import DEFAULT_QDRANT_URL
 
 from .common import (
     ExperimentError,
     Progress,
     WikipediaEnvironment,
+    backend_name,
     format_metric,
+    open_database,
     prepare_wikipedia,
     print_table,
     prompt_positive_int,
-    restart_qdrant,
+    reset_vector_cache,
     select_benchmark_questions,
     summarize,
 )
 
-DESCRIPTION = "Measure Qdrant cache hit and non-hit retrieval latency"
+DESCRIPTION = "Measure vector database cache hit and non-hit retrieval latency"
 DEFAULT_QUERIES = 20
 DEFAULT_REPETITIONS = 10
 TOP_K = 5
 
 
 def query_latency_ms(
-    client: Any,
+    database: Any,
     collection: str,
     vector: Sequence[float],
     *,
     timer_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> float:
+    """Time one search through the backend's own API.
+
+    Goes through VectorDB.search rather than a client-specific call so the same
+    measurement works against Qdrant and Milvus, and so it times the same path
+    the agent's retriever takes.
+    """
     started = timer_ns()
-    response = client.query_points(
-        collection_name=collection,
-        query=list(vector),
-        limit=TOP_K,
-        with_payload=True,
-        with_vectors=False,
-    )
+    results = database.search(list(vector), limit=TOP_K)
     ended = timer_ns()
-    points = getattr(response, "points", [])
-    if not points:
-        raise ExperimentError(f"Qdrant returned no points from {collection}")
+    if not results:
+        raise ExperimentError(f"vector search returned nothing from {collection}")
     return (ended - started) / 1_000_000
 
 
@@ -64,10 +63,10 @@ def measure_rounds(
     completed = 0
     for repetition in range(repetitions):
         if restart_each_round:
-            restart_qdrant(environment, collection)
-        with QdrantVectorDB(environment.database.config) as database:
+            reset_vector_cache(environment, collection)
+        with open_database(environment) as database:
             for vector in vectors:
-                latencies.append(query_latency_ms(database.client, collection, vector))
+                latencies.append(query_latency_ms(database, collection, vector))
                 completed += 1
                 progress.update(completed, f"round={repetition + 1}")
     return latencies
@@ -96,25 +95,24 @@ def render_report(latencies: dict[str, list[float]], point_count: int) -> None:
     )
     print("p95-worst is numeric latency p95; lower is better.")
     print(
-        "non-hit resets Qdrant before each round, but remains best-effort: host OS "
-        "page-cache eviction is not performed and later queries may benefit from warming."
+        "non-hit resets the backend before each round and remains best-effort. On "
+        "Qdrant the container is restarted, which clears its in-process caches but "
+        "not the host page cache. On Milvus the host page cache is dropped, which "
+        "is where a DiskANN index warms because Knowhere reads it with pread, but "
+        "Milvus's own node cache survives. Neither is a process-fresh measurement."
     )
 
 
 def run(query_count: int, repetitions: int) -> None:
     questions = select_benchmark_questions(query_count)
     with prepare_wikipedia(require_idle=True) as environment:
-        url = environment.database.config.url or ""
-        if url.rstrip("/") != DEFAULT_QDRANT_URL:
-            raise ExperimentError(
-                "vectordb experiment requires local Docker Qdrant so it can control "
-                f"cold starts; configured endpoint is {url}"
-            )
+        backend = backend_name(environment)
         point_count = environment.points_count
         if point_count < TOP_K:
             raise ExperimentError(
-                f"Qdrant has {point_count} points; at least {TOP_K} are required"
+                f"collection has {point_count} points; at least {TOP_K} are required"
             )
+        print(f"setup: backend {backend}", flush=True)
         print(f"setup: loading BGE-M3 from {environment.paths.model_dir}", flush=True)
         try:
             encoder = Encoder(environment.paths.bundle_dir, require_complete=False)
@@ -137,9 +135,9 @@ def run(query_count: int, repetitions: int) -> None:
             )
         }
         print("setup: warming collection for cache-hit target", flush=True)
-        with QdrantVectorDB(environment.database.config) as database:
+        with open_database(environment) as database:
             for vector in query_vectors:
-                query_latency_ms(database.client, collection, vector)
+                query_latency_ms(database, collection, vector)
         latencies["hit"] = measure_rounds(
             environment,
             collection,

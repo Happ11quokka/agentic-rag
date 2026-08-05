@@ -35,7 +35,7 @@ def test_retrieval_separates_timings_and_preserves_exact_visible_text() -> None:
     ).search("query")
 
     assert call["encode_duration_ms"] == 1
-    assert call["qdrant_duration_ms"] == 1
+    assert call["search_duration_ms"] == 1
     assert call["results"][0] == {
         "rank": 1,
         "source_id": "a",

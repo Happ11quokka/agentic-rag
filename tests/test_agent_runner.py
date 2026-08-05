@@ -107,7 +107,7 @@ class Retriever:
         return {
             "query": query,
             "encode_duration_ms": 1.0,
-            "qdrant_duration_ms": 2.0,
+            "search_duration_ms": 2.0,
             "results": [],
         }
 

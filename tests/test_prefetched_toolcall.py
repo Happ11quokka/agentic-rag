@@ -53,18 +53,18 @@ def retrieval(
     query: str,
     *,
     encode_start_ns: int = 10_000_000,
-    qdrant_start_ns: int = 12_000_000,
-    qdrant_end_ns: int = 14_000_000,
+    search_start_ns: int = 12_000_000,
+    search_end_ns: int = 14_000_000,
     source_ids: tuple[str, ...] = ("a",),
 ) -> dict[str, Any]:
     return {
         "query": query,
         "encode_start_ns": encode_start_ns,
-        "encode_end_ns": qdrant_start_ns,
-        "encode_duration_ms": (qdrant_start_ns - encode_start_ns) / 1_000_000,
-        "qdrant_start_ns": qdrant_start_ns,
-        "qdrant_end_ns": qdrant_end_ns,
-        "qdrant_duration_ms": (qdrant_end_ns - qdrant_start_ns) / 1_000_000,
+        "encode_end_ns": search_start_ns,
+        "encode_duration_ms": (search_start_ns - encode_start_ns) / 1_000_000,
+        "search_start_ns": search_start_ns,
+        "search_end_ns": search_end_ns,
+        "search_duration_ms": (search_end_ns - search_start_ns) / 1_000_000,
         "results": [
             {
                 "rank": rank,
@@ -158,14 +158,14 @@ def test_coordinator_stop_breaks_start_barrier_cleanly() -> None:
 def test_pair_retrievals_measures_readiness_exact_match_and_overlap() -> None:
     target = retrieval(
         "same",
-        qdrant_start_ns=300_000_000,
-        qdrant_end_ns=340_000_000,
+        search_start_ns=300_000_000,
+        search_end_ns=340_000_000,
         source_ids=("a", "b"),
     )
     draft = retrieval(
         "same",
-        qdrant_start_ns=100_000_000,
-        qdrant_end_ns=200_000_000,
+        search_start_ns=100_000_000,
+        search_end_ns=200_000_000,
         source_ids=("b", "c"),
     )
     pairs = prefetched_toolcall.pair_retrievals(
@@ -181,13 +181,13 @@ def test_pair_retrievals_measures_readiness_exact_match_and_overlap() -> None:
             "target_query": "same",
             "draft_query": "same",
             "draft_retrieval_present": True,
-            "draft_finished_before_target_qdrant": True,
+            "draft_finished_before_target_search": True,
             "query_exact_match": True,
             "exact_warm_ready": True,
             "lead_time_ms": 100.0,
             "result_source_overlap": 0.5,
-            "target_qdrant_duration_ms": 40.0,
-            "draft_qdrant_duration_ms": 100.0,
+            "target_search_duration_ms": 40.0,
+            "draft_search_duration_ms": 100.0,
         }
     ]
 
@@ -196,9 +196,9 @@ def test_record_result_separates_role_latencies_and_coverage(
     capsys: Any,
 ) -> None:
     target_retrieval = retrieval(
-        "same", qdrant_start_ns=30_000_000, qdrant_end_ns=40_000_000
+        "same", search_start_ns=30_000_000, search_end_ns=40_000_000
     )
-    draft_retrieval = retrieval("same", qdrant_end_ns=20_000_000)
+    draft_retrieval = retrieval("same", search_end_ns=20_000_000)
     target_call = model_call([], content="answer")
     draft_call = model_call([], query="same")
     result = {
@@ -228,8 +228,8 @@ def test_record_result_separates_role_latencies_and_coverage(
 
     metrics = summary["metrics"]
     assert metrics["target_end_to_end_ms"]["mean"] == 50
-    assert metrics["retrieval_by_role"]["target"]["qdrant_duration_ms"]["count"] == 1
-    assert metrics["retrieval_by_role"]["draft"]["qdrant_duration_ms"]["count"] == 1
+    assert metrics["retrieval_by_role"]["target"]["search_duration_ms"]["count"] == 1
+    assert metrics["retrieval_by_role"]["draft"]["search_duration_ms"]["count"] == 1
     assert metrics["prefetch"]["coverage_rate"] == 1
     assert metrics["prefetch"]["exact_warm_ready_rate"] == 1
 
@@ -267,13 +267,13 @@ def test_run_benchmark_syncs_after_target_retrieval() -> None:
     class DraftRetriever:
         def search(self, query):
             draft_retrieved.set()
-            return retrieval(query, qdrant_end_ns=20_000_000)
+            return retrieval(query, search_end_ns=20_000_000)
 
     class TargetRetriever:
         def search(self, query):
             assert draft_retrieved.wait(timeout=1)
             return retrieval(
-                query, qdrant_start_ns=30_000_000, qdrant_end_ns=40_000_000
+                query, search_start_ns=30_000_000, search_end_ns=40_000_000
             )
 
     result = prefetched_toolcall.run_benchmark(

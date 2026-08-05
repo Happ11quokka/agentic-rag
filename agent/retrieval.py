@@ -9,7 +9,7 @@ from wikipedia.types import SearchResult
 
 
 class TimedRetriever:
-    """Measure local encoding and Qdrant search as separate operations."""
+    """Measure local encoding and vector search as separate operations."""
 
     def __init__(
         self,
@@ -36,9 +36,9 @@ class TimedRetriever:
         encode_start = self.clock_ns()
         vector = self.encoder.encode(query)
         encode_end = self.clock_ns()
-        qdrant_start = self.clock_ns()
+        search_start = self.clock_ns()
         raw_results = self.database.search(vector, limit=self.top_k)
-        qdrant_end = self.clock_ns()
+        search_end = self.clock_ns()
 
         results = [
             self._result_value(rank, result)
@@ -49,9 +49,9 @@ class TimedRetriever:
             "encode_start_ns": encode_start,
             "encode_end_ns": encode_end,
             "encode_duration_ms": (encode_end - encode_start) / 1_000_000,
-            "qdrant_start_ns": qdrant_start,
-            "qdrant_end_ns": qdrant_end,
-            "qdrant_duration_ms": (qdrant_end - qdrant_start) / 1_000_000,
+            "search_start_ns": search_start,
+            "search_end_ns": search_end,
+            "search_duration_ms": (search_end - search_start) / 1_000_000,
             "results": results,
         }
 

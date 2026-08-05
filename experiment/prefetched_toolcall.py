@@ -22,7 +22,6 @@ from agent.runner import (
     prompt_hash,
 )
 from wikipedia.encoder import Encoder
-from wikipedia.qdrant import QdrantVectorDB
 
 from .artifacts import RunArtifacts, run_metadata
 from .common import (
@@ -41,13 +40,14 @@ from .common import (
     Progress,
     format_metric,
     llama_server_binary,
+    open_database,
     prepare_wikipedia,
     print_histograms,
     print_table,
     prompt_positive_int,
     require_models,
-    require_restartable_qdrant,
-    restart_qdrant,
+    require_resettable,
+    reset_vector_cache,
     select_benchmark_questions,
     summarize,
 )
@@ -333,11 +333,11 @@ def run_benchmark(
 
 def _retrieval_total_ms(retrieval: dict[str, Any]) -> float:
     start = retrieval.get("encode_start_ns")
-    end = retrieval.get("qdrant_end_ns")
+    end = retrieval.get("search_end_ns")
     if isinstance(start, int) and isinstance(end, int):
         return (end - start) / 1_000_000
     return float(retrieval.get("encode_duration_ms", 0)) + float(
-        retrieval.get("qdrant_duration_ms", 0)
+        retrieval.get("search_duration_ms", 0)
     )
 
 
@@ -367,8 +367,8 @@ def pair_retrievals(
     for index, target in enumerate(target_outcome["retrieval_calls"], start=1):
         attempt = by_sync.get(index - 1)
         draft = attempt and attempt.get("retrieval_call")
-        target_start = target.get("qdrant_start_ns")
-        draft_end = draft and draft.get("qdrant_end_ns")
+        target_start = target.get("search_start_ns")
+        draft_end = draft and draft.get("search_end_ns")
         ready = (
             isinstance(target_start, int)
             and isinstance(draft_end, int)
@@ -383,7 +383,7 @@ def pair_retrievals(
                 "target_query": target.get("query"),
                 "draft_query": draft and draft.get("query"),
                 "draft_retrieval_present": draft is not None,
-                "draft_finished_before_target_qdrant": ready,
+                "draft_finished_before_target_search": ready,
                 "query_exact_match": exact,
                 "exact_warm_ready": ready and exact,
                 "lead_time_ms": (
@@ -394,9 +394,9 @@ def pair_retrievals(
                 "result_source_overlap": (
                     _result_source_overlap(target, draft) if draft else None
                 ),
-                "target_qdrant_duration_ms": target.get("qdrant_duration_ms"),
-                "draft_qdrant_duration_ms": (
-                    draft.get("qdrant_duration_ms") if draft else None
+                "target_search_duration_ms": target.get("search_duration_ms"),
+                "draft_search_duration_ms": (
+                    draft.get("search_duration_ms") if draft else None
                 ),
             }
         )
@@ -410,7 +410,7 @@ def _new_results() -> dict[str, Any]:
         "target_statuses": {},
         "draft_statuses": {},
         "retrieval": {
-            role: {"encode": [], "qdrant": [], "total": []}
+            role: {"encode": [], "search": [], "total": []}
             for role in ("target", "draft")
         },
         "llm": {
@@ -426,8 +426,8 @@ def _new_results() -> dict[str, Any]:
         "lead_time": [],
         "result_overlap": [],
         "sync_delay": [],
-        "target_qdrant_exact_warm": [],
-        "target_qdrant_other": [],
+        "target_search_exact_warm": [],
+        "target_search_other": [],
         "cancelled_draft_generations": 0,
         "stale_draft_queries": 0,
     }
@@ -453,7 +453,7 @@ def _append_retrieval_metrics(
     selected: dict[str, list[float]], retrieval: dict[str, Any]
 ) -> None:
     selected["encode"].append(float(retrieval["encode_duration_ms"]))
-    selected["qdrant"].append(float(retrieval["qdrant_duration_ms"]))
+    selected["search"].append(float(retrieval["search_duration_ms"]))
     selected["total"].append(_retrieval_total_ms(retrieval))
 
 
@@ -495,19 +495,19 @@ def record_result(results: dict[str, Any], result: dict[str, Any]) -> None:
 
     results["target_query_count"] += len(result["query_pairs"])
     for pair in result["query_pairs"]:
-        qdrant = pair.get("target_qdrant_duration_ms")
+        search_ms = pair.get("target_search_duration_ms")
         if pair["draft_retrieval_present"]:
             results["paired_draft_query_count"] += 1
-        if pair["draft_finished_before_target_qdrant"]:
+        if pair["draft_finished_before_target_search"]:
             results["warm_ready_count"] += 1
         if pair["query_exact_match"]:
             results["exact_match_count"] += 1
         if pair["exact_warm_ready"]:
             results["exact_warm_ready_count"] += 1
-            if qdrant is not None:
-                results["target_qdrant_exact_warm"].append(float(qdrant))
-        elif qdrant is not None:
-            results["target_qdrant_other"].append(float(qdrant))
+            if search_ms is not None:
+                results["target_search_exact_warm"].append(float(search_ms))
+        elif search_ms is not None:
+            results["target_search_other"].append(float(search_ms))
         if pair["lead_time_ms"] is not None:
             results["lead_time"].append(float(pair["lead_time_ms"]))
         if pair["result_source_overlap"] is not None:
@@ -530,7 +530,7 @@ def build_summary(results: dict[str, Any]) -> dict[str, Any]:
             "retrieval_by_role": {
                 role: {
                     "encode_duration_ms": _stats(values["encode"]),
-                    "qdrant_duration_ms": _stats(values["qdrant"]),
+                    "search_duration_ms": _stats(values["search"]),
                     "total_duration_ms": _stats(values["total"]),
                 }
                 for role, values in results["retrieval"].items()
@@ -568,10 +568,10 @@ def build_summary(results: dict[str, Any]) -> dict[str, Any]:
                     results["result_overlap"], higher_is_better=True
                 ),
                 "sync_to_draft_request_ms": _stats(results["sync_delay"]),
-                "target_qdrant_ms_exact_warm_ready": _stats(
-                    results["target_qdrant_exact_warm"]
+                "target_search_ms_exact_warm_ready": _stats(
+                    results["target_search_exact_warm"]
                 ),
-                "target_qdrant_ms_other": _stats(results["target_qdrant_other"]),
+                "target_search_ms_other": _stats(results["target_search_other"]),
                 "cancelled_draft_generations": results["cancelled_draft_generations"],
                 "stale_draft_queries": results["stale_draft_queries"],
             },
@@ -617,7 +617,7 @@ def render_report(results: dict[str, Any]) -> None:
     for role in ("target", "draft"):
         for label, key in (
             ("encode (ms)", "encode_duration_ms"),
-            ("Qdrant (ms)", "qdrant_duration_ms"),
+            ("Search (ms)", "search_duration_ms"),
             ("total (ms)", "total_duration_ms"),
         ):
             stats = metrics["retrieval_by_role"][role][key]
@@ -635,7 +635,7 @@ def render_report(results: dict[str, Any]) -> None:
     print_histograms(
         "Qdrant RPC latency histogram (ms; completed queries)",
         {
-            role: results["retrieval"][role]["qdrant"]
+            role: results["retrieval"][role]["search"]
             for role in ("target", "draft")
         },
     )
@@ -691,10 +691,10 @@ def render_report(results: dict[str, Any]) -> None:
             ),
             _summary_row(
                 "target Qdrant exact+ready (ms)",
-                prefetch["target_qdrant_ms_exact_warm_ready"],
+                prefetch["target_search_ms_exact_warm_ready"],
             ),
             _summary_row(
-                "target Qdrant other (ms)", prefetch["target_qdrant_ms_other"]
+                "target search other (ms)", prefetch["target_search_ms_other"]
             ),
         ],
     )
@@ -737,7 +737,7 @@ def run(task_count: int, repetitions: int) -> None:
     results = _new_results()
 
     with prepare_wikipedia(require_idle=True) as environment:
-        require_restartable_qdrant(environment)
+        require_resettable(environment)
         print(f"setup: loading BGE-M3 from {environment.paths.model_dir}", flush=True)
         try:
             encoder = Encoder(environment.paths.bundle_dir, require_complete=False)
@@ -829,10 +829,8 @@ def run(task_count: int, repetitions: int) -> None:
                 completed = 0
                 for repetition in range(repetitions):
                     for question in questions:
-                        restart_qdrant(environment)
-                        with QdrantVectorDB(
-                            environment.database.config
-                        ) as database:
+                        reset_vector_cache(environment)
+                        with open_database(environment) as database:
                             retriever = TimedRetriever(
                                 encoder,
                                 database,

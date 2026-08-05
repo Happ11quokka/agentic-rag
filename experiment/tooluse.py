@@ -9,7 +9,6 @@ from typing import Any
 from agent.retrieval import TimedRetriever
 from agent.runner import AgentRunner, LlamaCppClient
 from wikipedia.encoder import Encoder
-from wikipedia.qdrant import QdrantVectorDB
 
 from .artifacts import RunArtifacts, run_metadata
 from .common import (
@@ -26,13 +25,14 @@ from .common import (
     Progress,
     format_metric,
     llama_server_binary,
+    open_database,
     prepare_wikipedia,
     print_histograms,
     print_table,
     prompt_positive_int,
     require_models,
-    require_restartable_qdrant,
-    restart_qdrant,
+    require_resettable,
+    reset_vector_cache,
     select_benchmark_questions,
     summarize,
 )
@@ -77,7 +77,7 @@ def _new_role_result() -> dict[str, Any]:
         "incomplete_between": [],
         "end_to_end": [],
         "incomplete_end_to_end": [],
-        "retrieval": {"encode": [], "qdrant": [], "total": []},
+        "retrieval": {"encode": [], "search": [], "total": []},
         "valid": 0,
         "failed": 0,
         "failure_statuses": {},
@@ -101,10 +101,10 @@ def _record_outcome(selected: dict[str, Any], outcome: dict[str, Any]) -> None:
         selected[key].append(float(end_to_end))
     for retrieval in outcome.get("retrieval_calls") or []:
         encode = float(retrieval["encode_duration_ms"])
-        qdrant = float(retrieval["qdrant_duration_ms"])
+        search = float(retrieval["search_duration_ms"])
         selected["retrieval"]["encode"].append(encode)
-        selected["retrieval"]["qdrant"].append(qdrant)
-        selected["retrieval"]["total"].append(encode + qdrant)
+        selected["retrieval"]["search"].append(search)
+        selected["retrieval"]["total"].append(encode + search)
 
     if valid:
         first, between = query_token_metrics(outcome)
@@ -163,7 +163,7 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
         for label, selected in (
             ("end-to-end (ms)", values["end_to_end"]),
             ("encode (ms)", values["retrieval"]["encode"]),
-            ("Qdrant (ms)", values["retrieval"]["qdrant"]),
+            ("Search (ms)", values["retrieval"]["search"]),
             ("retrieval total (ms)", values["retrieval"]["total"]),
         ):
             stats = summarize(selected)
@@ -184,9 +184,9 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
         {role: results[role]["end_to_end"] for role in ("main", "draft")},
     )
     print_histograms(
-        "Qdrant RPC latency histogram (ms; completed queries)",
+        "Vector search latency histogram (ms; completed queries)",
         {
-            role: results[role]["retrieval"]["qdrant"]
+            role: results[role]["retrieval"]["search"]
             for role in ("main", "draft")
         },
     )
@@ -267,8 +267,8 @@ def build_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
                 "encode_duration_ms": asdict(
                     summarize(result["retrieval"]["encode"])
                 ),
-                "qdrant_duration_ms": asdict(
-                    summarize(result["retrieval"]["qdrant"])
+                "search_duration_ms": asdict(
+                    summarize(result["retrieval"]["search"])
                 ),
                 "total_duration_ms": asdict(
                     summarize(result["retrieval"]["total"])
@@ -293,7 +293,7 @@ def run(task_count: int, repetitions: int) -> None:
     results = {role: _new_role_result() for role in ("main", "draft")}
 
     with prepare_wikipedia(require_idle=True) as environment:
-        require_restartable_qdrant(environment)
+        require_resettable(environment)
         print(f"setup: loading BGE-M3 from {environment.paths.model_dir}", flush=True)
         try:
             encoder = Encoder(environment.paths.bundle_dir, require_complete=False)
@@ -364,10 +364,8 @@ def run(task_count: int, repetitions: int) -> None:
                         )
                         for repetition in range(repetitions):
                             for question in questions:
-                                restart_qdrant(environment)
-                                with QdrantVectorDB(
-                                    environment.database.config
-                                ) as database:
+                                reset_vector_cache(environment)
+                                with open_database(environment) as database:
                                     retriever = TimedRetriever(
                                         encoder,
                                         database,

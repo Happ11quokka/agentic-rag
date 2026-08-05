@@ -400,7 +400,7 @@ def test_tooluse_records_failed_run_metrics_and_status() -> None:
         "llm_calls": [_call(12, "one"), _call(8, "two")],
         "timing": {"end_to_end_ms": 50.0},
         "retrieval_calls": [
-            {"encode_duration_ms": 2.0, "qdrant_duration_ms": 3.0}
+            {"encode_duration_ms": 2.0, "search_duration_ms": 3.0}
         ],
     }
 
@@ -415,7 +415,7 @@ def test_tooluse_records_failed_run_metrics_and_status() -> None:
     assert selected["incomplete_end_to_end"] == [50.0]
     assert selected["retrieval"] == {
         "encode": [2.0],
-        "qdrant": [3.0],
+        "search": [3.0],
         "total": [5.0],
     }
 
@@ -470,7 +470,7 @@ def test_tooluse_report_shows_incomplete_metrics_and_failure_status(
     assert "Incomplete-run metrics" in output
     assert "Failure status breakdown" in output
     assert "End-to-end latency histogram" in output
-    assert "Qdrant RPC latency histogram" in output
+    assert "Vector search latency histogram" in output
     rows = [line.split() for line in output.splitlines()]
     assert ["main", "timeout", "1"] in rows
     assert ["draft", "none", "0"] in rows
@@ -496,13 +496,14 @@ def test_vectordb_run_measures_source_non_hit_then_hit(
     warmed: list[tuple[object, str, list[float]]] = []
     reported: list[tuple[dict[str, list[float]], int]] = []
     config = SimpleNamespace(
-        url=vectordb.DEFAULT_QDRANT_URL,
+        uri="http://localhost:19530",
         collection_name="source",
     )
     environment = SimpleNamespace(
         database=SimpleNamespace(config=config, client=object()),
         points_count=point_count,
         paths=SimpleNamespace(model_dir="model", bundle_dir="bundle"),
+        manifest={"milvus": {"collection": "source"}},
     )
 
     @contextmanager
@@ -524,6 +525,9 @@ def test_vectordb_run_measures_source_non_hit_then_hit(
             assert received_config is config
             self.client = object()
 
+        def search(self, vector, limit=None):
+            return [object()]
+
         def __enter__(self):
             return self
 
@@ -537,7 +541,7 @@ def test_vectordb_run_measures_source_non_hit_then_hit(
     )
     monkeypatch.setattr(vectordb, "prepare_wikipedia", prepare_wikipedia)
     monkeypatch.setattr(vectordb, "Encoder", Encoder)
-    monkeypatch.setattr(vectordb, "QdrantVectorDB", Database)
+    monkeypatch.setattr(vectordb, "open_database", lambda env: Database(env.database.config))
 
     def measure_rounds(
         environment,
@@ -583,13 +587,218 @@ def test_vectordb_run_measures_source_non_hit_then_hit(
 def test_query_latency_checks_results() -> None:
     ticks = iter([1_000_000, 4_000_000])
 
-    class Client:
-        def query_points(self, **kwargs):
-            return type("Response", (), {"points": [object()]})()
+    class Database:
+        def search(self, vector, limit=None):
+            return [object()]
 
     assert (
         vectordb.query_latency_ms(
-            Client(), "collection", [0.0] * 1024, timer_ns=lambda: next(ticks)
+            Database(), "collection", [0.0] * 1024, timer_ns=lambda: next(ticks)
         )
         == 3
     )
+
+
+def _milvus_environment(**manifest: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        database=SimpleNamespace(
+            config=SimpleNamespace(
+                uri="http://localhost:19530", collection_name="wikipedia"
+            )
+        ),
+        manifest={"milvus": {"collection": "wikipedia", **manifest}},
+    )
+
+
+def _qdrant_environment() -> SimpleNamespace:
+    return SimpleNamespace(
+        database=SimpleNamespace(
+            config=SimpleNamespace(
+                url=common.DEFAULT_QDRANT_URL, collection_name="wikipedia"
+            )
+        ),
+        manifest={"qdrant": {"container": "test-qdrant"}},
+    )
+
+
+def test_backend_name_reads_the_bundle_manifest() -> None:
+    assert common.backend_name(_milvus_environment()) == "milvus"
+    assert common.backend_name(_qdrant_environment()) == "qdrant"
+
+
+def test_backend_name_rejects_a_bundle_configured_for_neither() -> None:
+    with pytest.raises(ExperimentError, match="no vector database"):
+        common.backend_name(SimpleNamespace(manifest={}, database=None))
+
+
+def test_reset_vector_cache_restarts_the_container_for_qdrant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        lambda arguments, **kwargs: calls.append(arguments)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        common.httpx,
+        "get",
+        lambda url, **kwargs: calls.append(url) or SimpleNamespace(status_code=200),
+    )
+
+    common.reset_vector_cache(_qdrant_environment())
+
+    assert calls[0] == ["docker", "restart", "test-qdrant"]
+
+
+def test_reset_vector_cache_drops_the_page_cache_for_milvus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restarting Milvus would be a five-hour reload, so cold means an empty cache.
+
+    Milvus empties its local storage at startup and re-fetches the DiskANN index
+    from object storage; a restart per question is not a measurement technique,
+    it is a way to never finish. Knowhere reads that index with pread, so the
+    pages it warms live in the host page cache and dropping them is what makes
+    the next query cold.
+    """
+    dropped: list[bool] = []
+    restarted: list[object] = []
+    monkeypatch.setattr(common, "drop_page_cache", lambda: dropped.append(True) or True)
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        lambda *a, **k: restarted.append(a) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    common.reset_vector_cache(_milvus_environment())
+
+    assert dropped == [True]
+    assert restarted == [], "a Milvus restart would discard the loaded index"
+
+
+def test_reset_vector_cache_says_so_when_the_page_cache_will_not_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common, "drop_page_cache", lambda: False)
+
+    with pytest.raises(ExperimentError, match="page cache"):
+        common.reset_vector_cache(_milvus_environment())
+
+
+def test_open_database_builds_the_backend_the_bundle_declares(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[str] = []
+    monkeypatch.setattr(
+        common, "MilvusVectorDB", lambda config: built.append("milvus") or object()
+    )
+    monkeypatch.setattr(
+        common, "QdrantVectorDB", lambda config: built.append("qdrant") or object()
+    )
+
+    common.open_database(_milvus_environment())
+    common.open_database(_qdrant_environment())
+
+    assert built == ["milvus", "qdrant"]
+
+
+def test_prepare_wikipedia_opens_a_milvus_bundle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HDD experiment ingests into Milvus DiskANN, not Qdrant."""
+    paths = BundlePaths.from_dir(tmp_path)
+    closed = SimpleNamespace(value=False)
+
+    class Database:
+        def __init__(self, config):
+            self.config = config
+            self.client = SimpleNamespace(
+                has_collection=lambda name, timeout=None: True
+            )
+
+        def index_state(self):
+            return {
+                "index_type": "DISKANN",
+                "state": "Finished",
+                "total_rows": 10_000_000,
+                "indexed_rows": 10_000_000,
+                "pending_rows": 8_733_000,
+                "reason": "",
+            }
+
+        def close(self):
+            closed.value = True
+
+    monkeypatch.setattr(common.BundlePaths, "resolve", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        common,
+        "load_manifest",
+        lambda paths, require_complete: {
+            "schema_version": 1,
+            "status": "complete",
+            "milvus": {
+                "uri": "http://localhost:19530",
+                "collection": "wikipedia_2024_06_bge_m3_en_v1",
+                "storage_dir": str(tmp_path / "milvus"),
+                "index_type": "DISKANN",
+                "search_list": 100,
+            },
+        },
+    )
+    monkeypatch.setattr(common, "model_is_downloaded", lambda paths: True)
+    monkeypatch.setattr(common, "ensure_milvus", lambda *a, **k: "already running")
+    monkeypatch.setattr(common, "MilvusVectorDB", Database)
+    monkeypatch.setattr(common, "_local_ingestion_processes", lambda: [])
+
+    with common.prepare_wikipedia(stability_seconds=0) as environment:
+        assert common.backend_name(environment) == "milvus"
+        assert environment.points_count == 10_000_000
+        assert environment.incomplete is False
+
+    assert closed.value is True
+
+
+def test_prepare_wikipedia_rejects_a_milvus_collection_with_uncovered_rows(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uncovered rows are answered by brute force, which is not the index under test."""
+    paths = BundlePaths.from_dir(tmp_path)
+
+    class Database:
+        def __init__(self, config):
+            self.config = config
+            self.client = SimpleNamespace(
+                has_collection=lambda name, timeout=None: True
+            )
+
+        def index_state(self):
+            return {
+                "index_type": "DISKANN",
+                "state": "Finished",
+                "total_rows": 10_000_000,
+                "indexed_rows": 4_000_000,
+                "pending_rows": 0,
+                "reason": "",
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(common.BundlePaths, "resolve", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        common,
+        "load_manifest",
+        lambda paths, require_complete: {
+            "status": "complete",
+            "milvus": {"collection": "wikipedia", "uri": "http://localhost:19530"},
+        },
+    )
+    monkeypatch.setattr(common, "model_is_downloaded", lambda paths: True)
+    monkeypatch.setattr(common, "ensure_milvus", lambda *a, **k: "already running")
+    monkeypatch.setattr(common, "MilvusVectorDB", Database)
+    monkeypatch.setattr(common, "_local_ingestion_processes", lambda: [])
+
+    with pytest.raises(ExperimentError, match="not covered by the index"):
+        common.prepare_wikipedia(stability_seconds=0)

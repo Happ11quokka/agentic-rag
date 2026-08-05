@@ -522,9 +522,9 @@ def summarize_question(
     prefill = sum((call["timing"].get("server_prompt_ms") or 0) for call in llm_calls)
     decode = sum((call["timing"].get("server_decode_ms") or 0) for call in llm_calls)
     encoding = sum(call["encode_duration_ms"] for call in retrieval_calls)
-    qdrant = sum(call["qdrant_duration_ms"] for call in retrieval_calls)
+    search = sum(call["search_duration_ms"] for call in retrieval_calls)
     end_to_end = (ended_ns - started_ns) / 1_000_000
-    accounted = llm_wall + encoding + qdrant
+    accounted = llm_wall + encoding + search
     return {
         "start_ns": started_ns,
         "end_ns": ended_ns,
@@ -533,7 +533,7 @@ def summarize_question(
         "total_prefill_ms": prefill,
         "total_decode_ms": decode,
         "total_retrieval_encode_ms": encoding,
-        "total_qdrant_search_ms": qdrant,
+        "total_vector_search_ms": search,
         "agent_overhead_ms": max(0.0, end_to_end - accounted),
         "prompt_tokens": sum(
             int(call.get("usage", {}).get("prompt_tokens", 0)) for call in llm_calls
