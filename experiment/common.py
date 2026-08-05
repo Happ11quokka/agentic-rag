@@ -81,13 +81,22 @@ MODEL_SPECS = {
         bytes=9_001_752_960,
         sha256="500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0",
     ),
+    # Draft is deliberately small: it only has to guess the target's next search
+    # query, and every byte it costs is bandwidth taken from the target it runs
+    # beside. Qwen ships no Q4_K_M below 4B, so this is Q8_0 -- higher precision
+    # at a smaller total than the 4B Q4_K_M it replaces (1.83 GB vs 2.50 GB).
+    # Qwen3-0.6B-Q8_0 (0.64 GB, rev 23749fefcc72300e3a2ad315e1317431b06b590a,
+    # sha256 9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031)
+    # is the next step down, but it has to emit a well-formed tool call under
+    # --jinja; a draft that cannot do that measures its own formatting, not its
+    # ability to predict the query.
     "draft": ModelSpec(
         role="draft",
-        repo="Qwen/Qwen3-4B-GGUF",
-        revision="bc640142c66e1fdd12af0bd68f40445458f3869b",
-        filename="Qwen3-4B-Q4_K_M.gguf",
-        bytes=2_497_280_256,
-        sha256="7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+        repo="Qwen/Qwen3-1.7B-GGUF",
+        revision="90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+        filename="Qwen3-1.7B-Q8_0.gguf",
+        bytes=1_834_426_016,
+        sha256="061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
     ),
 }
 
