@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from . import (
     independent_run,
@@ -26,7 +27,7 @@ class Experiment:
     name: str
     description: str
     prompt_and_run: Callable[..., None]
-    uses_models: bool = True
+    model_selection: Literal["pair", "single", "none"] = "pair"
 
 
 EXPERIMENTS = (
@@ -44,7 +45,10 @@ EXPERIMENTS = (
         independent_run.prompt_and_run,
     ),
     Experiment(
-        "tooluse", "tool-use query tokens and latency", tooluse.prompt_and_run
+        "tooluse",
+        "tool-use query tokens and latency",
+        tooluse.prompt_and_run,
+        model_selection="single",
     ),
     Experiment(
         "prefetched-toolcall",
@@ -55,7 +59,7 @@ EXPERIMENTS = (
         "vectordb",
         "Qdrant cache hit and non-hit latency",
         vectordb.prompt_and_run,
-        uses_models=False,
+        model_selection="none",
     ),
 )
 
@@ -82,20 +86,29 @@ def choose_experiment(*, input_fn: Callable[[str], str] = input) -> Experiment:
 def choose_model(
     role: str,
     *,
+    label: str | None = None,
     input_fn: Callable[[str], str] = input,
 ) -> ModelSpec:
-    label = "target" if role == "main" else role
+    selected_label = label or ("target" if role == "main" else role)
     specs = tuple(MODEL_SPECS.values())
     default_key = DEFAULT_MODEL_KEYS[role]
-    print(f"Available {label} models:")
+    heading = (
+        "Available models:"
+        if label == "model"
+        else f"Available {selected_label} models:"
+    )
+    prompt_label = "model" if label == "model" else f"{selected_label} model"
+    print(heading)
     for index, spec in enumerate(specs, start=1):
         suffix = " (default)" if spec.key == default_key else ""
         print(f"  {index}. {spec.label} [{spec.key}]{suffix}")
     while True:
         try:
-            answer = input_fn(f"Select {label} model by number or key: ").strip()
+            answer = input_fn(f"Select {prompt_label} by number or key: ").strip()
         except EOFError:
-            raise ExperimentError("model selection requires interactive input") from None
+            raise ExperimentError(
+                "model selection requires interactive input"
+            ) from None
         if not answer:
             return MODEL_SPECS[default_key]
         if answer.isdigit() and 1 <= int(answer) <= len(specs):
@@ -113,6 +126,10 @@ def choose_model_specs(
     }
 
 
+def choose_single_model(*, input_fn: Callable[[str], str] = input) -> ModelSpec:
+    return choose_model("main", label="model", input_fn=input_fn)
+
+
 def run_experiment(*, input_fn: Callable[[str], str] = input) -> None:
     if len(sys.argv) > 1:
         raise ExperimentError(
@@ -120,9 +137,12 @@ def run_experiment(*, input_fn: Callable[[str], str] = input) -> None:
             "and enter counts at its prompts"
         )
     selected = choose_experiment(input_fn=input_fn)
-    if selected.uses_models:
+    if selected.model_selection == "pair":
         model_specs = choose_model_specs(input_fn=input_fn)
         selected.prompt_and_run(input_fn=input_fn, model_specs=model_specs)
+    elif selected.model_selection == "single":
+        model_spec = choose_single_model(input_fn=input_fn)
+        selected.prompt_and_run(input_fn=input_fn, model_spec=model_spec)
     else:
         selected.prompt_and_run(input_fn=input_fn)
 

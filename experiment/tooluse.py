@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
@@ -30,18 +30,18 @@ from .common import (
     ModelSpec,
     ModelServer,
     Progress,
+    default_model_specs,
     format_metric,
     llama_server_binary,
     prepare_wikipedia,
     print_histograms,
     print_table,
     prompt_positive_int,
-    require_models,
-    resolve_model_specs,
     require_restartable_qdrant,
     restart_qdrant,
     select_benchmark_questions,
     summarize,
+    validate_model,
 )
 
 DESCRIPTION = "Measure tool-use query tokens and latency"
@@ -74,7 +74,7 @@ def query_token_metrics(outcome: dict[str, Any]) -> tuple[int | None, list[int]]
     return (counts[0] if counts else None, counts[1:])
 
 
-def _new_role_result() -> dict[str, Any]:
+def _new_result() -> dict[str, Any]:
     return {
         "queries": [],
         "first": [],
@@ -141,8 +141,7 @@ def _metric_rows(
     results: dict[str, dict[str, Any]], *, prefix: str = ""
 ) -> list[list[object]]:
     rows: list[list[object]] = []
-    for role in ("main", "draft"):
-        result = results[role]
+    for model, result in results.items():
         metrics = (
             ("queries / run", summarize(result[f"{prefix}queries"])),
             ("tokens to first query", summarize(result[f"{prefix}first"])),
@@ -151,7 +150,7 @@ def _metric_rows(
         for label, stats in metrics:
             rows.append(
                 [
-                    role,
+                    model,
                     label,
                     stats.count,
                     format_metric(stats.mean),
@@ -165,8 +164,7 @@ def _metric_rows(
 def render_report(results: dict[str, dict[str, Any]]) -> None:
     print("\nTool-use latency metrics")
     latency_rows: list[list[object]] = []
-    for role in ("main", "draft"):
-        values = results[role]
+    for model, values in results.items():
         for label, selected in (
             ("end-to-end (ms)", values["end_to_end"]),
             ("encode (ms)", values["retrieval"]["encode"]),
@@ -176,7 +174,7 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
             stats = summarize(selected)
             latency_rows.append(
                 [
-                    role,
+                    model,
                     label,
                     stats.count,
                     format_metric(stats.mean),
@@ -184,18 +182,15 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
                     format_metric(stats.p95_worst),
                 ]
             )
-    headers = ("role", "metric", "n", "mean", "median", "p95-worst")
+    headers = ("model", "metric", "n", "mean", "median", "p95-worst")
     print_table(headers, latency_rows)
     print_histograms(
         "End-to-end latency histogram (ms; valid runs)",
-        {role: results[role]["end_to_end"] for role in ("main", "draft")},
+        {model: values["end_to_end"] for model, values in results.items()},
     )
     print_histograms(
         "Qdrant RPC latency histogram (ms; completed queries)",
-        {
-            role: results[role]["retrieval"]["qdrant"]
-            for role in ("main", "draft")
-        },
+        {model: values["retrieval"]["qdrant"] for model, values in results.items()},
     )
 
     print("\nTool-use query metrics (generated tokens only)")
@@ -207,41 +202,41 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
         headers,
         [
             [
-                role,
+                model,
                 "end-to-end (ms)",
                 stats.count,
                 format_metric(stats.mean),
                 format_metric(stats.median),
                 format_metric(stats.p95_worst),
             ]
-            for role in ("main", "draft")
-            for stats in [summarize(results[role]["incomplete_end_to_end"])]
+            for model, values in results.items()
+            for stats in [summarize(values["incomplete_end_to_end"])]
         ]
         + _metric_rows(results, prefix="incomplete_"),
     )
 
     print("\nRun outcomes")
     print_table(
-        ("role", "valid", "failed", "zero-query", "one-query"),
+        ("model", "valid", "failed", "zero-query", "one-query"),
         [
             [
-                role,
+                model,
                 values["valid"],
                 values["failed"],
                 values["zero_query"],
                 values["one_query"],
             ]
-            for role, values in results.items()
+            for model, values in results.items()
         ],
     )
     print("\nFailure status breakdown")
     print_table(
-        ("role", "status", "count"),
+        ("model", "status", "count"),
         [
-            [role, status, count]
-            for role in ("main", "draft")
+            [model, status, count]
+            for model, values in results.items()
             for status, count in (
-                sorted(results[role]["failure_statuses"].items()) or [("none", 0)]
+                sorted(values["failure_statuses"].items()) or [("none", 0)]
             )
         ],
     )
@@ -249,9 +244,8 @@ def render_report(results: dict[str, dict[str, Any]]) -> None:
 
 def build_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {"roles": {}}
-    for role in ("main", "draft"):
-        result = results[role]
-        summary["roles"][role] = {
+    for model, result in results.items():
+        summary["roles"][model] = {
             "valid_metrics": {
                 "end_to_end_ms": asdict(summarize(result["end_to_end"])),
                 "queries_per_run": asdict(summarize(result["queries"])),
@@ -296,18 +290,15 @@ def run(
     task_count: int,
     repetitions: int,
     *,
-    model_specs: Mapping[str, ModelSpec] | None = None,
+    model_spec: ModelSpec | None = None,
 ) -> None:
-    selected_models = resolve_model_specs(model_specs)
+    selected_model = model_spec or default_model_specs()["main"]
     questions = select_benchmark_questions(task_count)
-    model_paths = require_models(selected_models)
+    print(f"setup: validating model ({selected_model.label})", flush=True)
+    model_path = validate_model(selected_model)
     binary, version = llama_server_binary()
-    print(
-        f"setup: llama.cpp build={version['build']}; "
-        f"target={selected_models['main'].filename}, "
-        f"draft={selected_models['draft'].filename}"
-    )
-    results = {role: _new_role_result() for role in ("main", "draft")}
+    print(f"setup: llama.cpp build={version['build']}; model={selected_model.filename}")
+    results = {"model": _new_result()}
 
     with prepare_wikipedia(require_idle=True) as environment:
         require_restartable_qdrant(environment)
@@ -324,12 +315,12 @@ def run(
             task_count=task_count,
             repetitions=repetitions,
             questions=questions,
-            model_specs=selected_models,
-            model_paths=model_paths,
+            model_specs={"model": selected_model},
+            model_paths={"model": model_path},
             llama_cpp=version,
             generation=GENERATION,
             parameters={
-                "execution": "isolated non-overlapping model phases",
+                "execution": "single model",
                 "agent_prompt": {
                     "text": SYSTEM_PROMPT,
                     "sha256": SYSTEM_PROMPT_SHA256,
@@ -365,70 +356,63 @@ def run(
             },
         )
         with RunArtifacts("tooluse", metadata) as artifacts:
-            total = task_count * repetitions * 2
+            total = task_count * repetitions
             progress = Progress("tooluse", total)
             completed = 0
-            for role in ("main", "draft"):
-                with ModelServer(
-                    role,
-                    binary,
-                    model_paths[role],
-                    MAIN_PORT,
-                    reasoning_budget=REASONING_BUDGET_TOKENS,
-                ) as server:
-                    client = LlamaCppClient(
-                        server.base_url, timeout_seconds=REQUEST_TIMEOUT_SECONDS
+            with ModelServer(
+                "model",
+                binary,
+                model_path,
+                MAIN_PORT,
+                reasoning_budget=REASONING_BUDGET_TOKENS,
+            ) as server:
+                client = LlamaCppClient(
+                    server.base_url, timeout_seconds=REQUEST_TIMEOUT_SECONDS
+                )
+                try:
+                    client.stream_completion(
+                        [{"role": "user", "content": FIXED_LLM_WARMUP}],
+                        {**GENERATION, "max_tokens": 32, "temperature": 0},
                     )
-                    try:
-                        client.stream_completion(
-                            [{"role": "user", "content": FIXED_LLM_WARMUP}],
-                            {**GENERATION, "max_tokens": 32, "temperature": 0},
-                        )
-                        for repetition in range(repetitions):
-                            for question in questions:
-                                restart_qdrant(environment)
-                                with QdrantVectorDB(
-                                    environment.database.config
-                                ) as database:
-                                    retriever = TimedRetriever(
-                                        encoder,
-                                        database,
-                                        top_k=RETRIEVAL_TOP_K,
-                                        max_chars_per_result=RETRIEVAL_MAX_CHARS,
-                                    )
-                                    runner = AgentRunner(
-                                        client,
-                                        retriever,
-                                        generation=GENERATION,
-                                        max_searches=MAX_SEARCHES,
-                                        question_timeout_seconds=(
-                                            QUESTION_TIMEOUT_SECONDS
-                                        ),
-                                    )
-                                    outcome = runner.run(question)
-                                artifacts.append(
-                                    {
-                                        "record_type": "agent_run",
-                                        "model_role": role,
-                                        "repetition": repetition + 1,
-                                        "question": question.agent_value(),
-                                        "outcome": outcome,
-                                    }
+                    for repetition in range(repetitions):
+                        for question in questions:
+                            restart_qdrant(environment)
+                            with QdrantVectorDB(
+                                environment.database.config
+                            ) as database:
+                                retriever = TimedRetriever(
+                                    encoder,
+                                    database,
+                                    top_k=RETRIEVAL_TOP_K,
+                                    max_chars_per_result=RETRIEVAL_MAX_CHARS,
                                 )
-                                selected = results[role]
-                                _record_outcome(selected, outcome)
-                                completed += 1
-                                progress.update(
-                                    completed,
-                                    (
-                                        f"role={role} round={repetition + 1} "
-                                        f"question={question.id}"
-                                    ),
+                                runner = AgentRunner(
+                                    client,
+                                    retriever,
+                                    generation=GENERATION,
+                                    max_searches=MAX_SEARCHES,
+                                    question_timeout_seconds=(QUESTION_TIMEOUT_SECONDS),
                                 )
-                    finally:
-                        client.close()
+                                outcome = runner.run(question)
+                            artifacts.append(
+                                {
+                                    "record_type": "agent_run",
+                                    "model_role": "model",
+                                    "repetition": repetition + 1,
+                                    "question": question.agent_value(),
+                                    "outcome": outcome,
+                                }
+                            )
+                            _record_outcome(results["model"], outcome)
+                            completed += 1
+                            progress.update(
+                                completed,
+                                (f"round={repetition + 1} question={question.id}"),
+                            )
+                finally:
+                    client.close()
 
-            if sum(result["valid"] for result in results.values()) == 0:
+            if results["model"]["valid"] == 0:
                 raise ExperimentError("tool-use experiment produced no valid runs")
             artifacts.write_summary(build_summary(results))
     render_report(results)
@@ -437,12 +421,12 @@ def run(
 def prompt_and_run(
     *,
     input_fn: Callable[[str], str] = input,
-    model_specs: Mapping[str, ModelSpec] | None = None,
+    model_spec: ModelSpec | None = None,
 ) -> None:
     task_count = prompt_positive_int(
         "FanOutQA task count", DEFAULT_TASKS, input_fn=input_fn
     )
     repetitions = prompt_positive_int(
-        "Repetitions per task and model", DEFAULT_REPETITIONS, input_fn=input_fn
+        "Repetitions per task", DEFAULT_REPETITIONS, input_fn=input_fn
     )
-    run(task_count, repetitions, model_specs=model_specs)
+    run(task_count, repetitions, model_spec=model_spec)

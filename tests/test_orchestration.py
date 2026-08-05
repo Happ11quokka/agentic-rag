@@ -420,7 +420,7 @@ def test_tool_query_tokens_require_server_usage() -> None:
 
 
 def test_tooluse_records_failed_run_metrics_and_status() -> None:
-    selected = tooluse._new_role_result()
+    selected = tooluse._new_result()
     outcome = {
         "terminal_status": "timeout",
         "search_count": 2,
@@ -448,7 +448,7 @@ def test_tooluse_records_failed_run_metrics_and_status() -> None:
 
 
 def test_tooluse_failed_run_survives_missing_token_usage() -> None:
-    selected = tooluse._new_role_result()
+    selected = tooluse._new_result()
     search = _call(1, "one")
     search["usage"] = {}
 
@@ -470,27 +470,15 @@ def test_tooluse_failed_run_survives_missing_token_usage() -> None:
 def test_tooluse_report_shows_incomplete_metrics_and_failure_status(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    results = {
-        "main": tooluse._new_role_result(),
-        "draft": tooluse._new_role_result(),
-    }
+    results = {"model": tooluse._new_result()}
     tooluse._record_outcome(
-        results["main"],
+        results["model"],
         {
             "terminal_status": "timeout",
             "search_count": 1,
             "llm_calls": [_call(12, "one")],
         },
     )
-    tooluse._record_outcome(
-        results["draft"],
-        {
-            "terminal_status": "final",
-            "search_count": 1,
-            "llm_calls": [_call(8, "one"), _call(3)],
-        },
-    )
-
     tooluse.render_report(results)
 
     output = capsys.readouterr().out
@@ -499,8 +487,9 @@ def test_tooluse_report_shows_incomplete_metrics_and_failure_status(
     assert "End-to-end latency histogram" in output
     assert "Qdrant RPC latency histogram" in output
     rows = [line.split() for line in output.splitlines()]
-    assert ["main", "timeout", "1"] in rows
-    assert ["draft", "none", "0"] in rows
+    assert ["model", "timeout", "1"] in rows
+    assert "main" not in output
+    assert "draft" not in output
 
 
 def test_vectordb_report_has_only_hit_and_non_hit(

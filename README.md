@@ -334,18 +334,19 @@ No filters, reranking, sparse, or hybrid search are included.
 # Download and verify every pinned GGUF in the experiment model catalog.
 uv run download-models
 
-# Select an experiment, target/draft models, and run counts.
+# Select an experiment, model setup, and run counts.
 uv run run-experiment
 ```
 
 `run-experiment` is intentionally interactive and accepts no arguments. Each
-LLM experiment accepts any catalog model for either role, including the same model
-for both roles. Enter selects Qwen3 14B Q4_K_M for target and Qwen3 1.7B Q8_0 for
-draft by default; Qwen3 4B Q4_K_M and Qwen3 0.6B Q8_0 remain selectable. The
-`vectordb` experiment skips model selection because it runs no LLM. Each orchestrator
-uses Python constants instead of TOML configuration, prepares its runtime, prints
-progress and its final metric table, and stores benchmark records under
-`experiment/results/`:
+paired LLM experiment accepts any catalog model for either role, including the same
+model for both roles. Enter selects Qwen3 14B Q4_K_M for target and Qwen3 1.7B Q8_0
+for draft by default. The `tooluse` experiment instead selects one model, defaulting
+to Qwen3 14B Q4_K_M; run it twice to compare different model setups. Qwen3 4B Q4_K_M
+and Qwen3 0.6B Q8_0 remain selectable. The `vectordb` experiment skips model
+selection because it runs no LLM. Each orchestrator uses Python constants instead of
+TOML configuration, prepares its runtime, prints progress and its final metric table,
+and stores benchmark records under `experiment/results/`:
 
 ```text
 experiment/results/<experiment>/<UTC-timestamp>-<short-id>/
@@ -372,16 +373,14 @@ failed runs retain completed JSONL rows and record the failure in `manifest.json
 - `independent-run` runs the selected target and draft in isolated, non-overlapping
   server phases with the same prompts and generation settings as `parallel`. It
   reports per-model TTFT and decode throughput without a combined metric.
-- `tooluse` runs the models in separate phases against Qdrant using Qwen's native,
-  sequential `search` tool calls and a 512-token thinking budget per turn. Target
-  and draft use the same FanOutQA agent prompt, search schema, and generation
-  policy, and begin each question with identical system/user messages. Their later
-  search transcripts remain role-local and independent. It reports end-to-end
-  question latency, encoder/Qdrant retrieval latency, generated tokens around
-  queries, zero/one-query regressions, incomplete-run diagnostics, and failure
-  statuses. End-to-end and Qdrant RPC distributions are printed as horizontal
-  ASCII histograms. Each request has a 180-second timeout; each multi-turn question
-  has a separate 600-second timeout.
+- `tooluse` runs one selected model against Qdrant using Qwen's native, sequential
+  `search` tool calls and a 512-token thinking budget per turn. Run the experiment
+  separately for each model setup being compared. It reports end-to-end question
+  latency, encoder/Qdrant retrieval latency, generated tokens around queries,
+  zero/one-query regressions, incomplete-run diagnostics, and failure statuses.
+  End-to-end and Qdrant RPC distributions are printed as horizontal ASCII
+  histograms. Each request has a 180-second timeout; each multi-turn question has a
+  separate 600-second timeout.
 - `prefetched-toolcall` runs the selected target and draft together. The draft
   uses the same FanOutQA agent prompt, search schema, and generation policy as the
   target. It starts from the same system/user messages, then receives an exact

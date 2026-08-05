@@ -79,6 +79,36 @@ def test_run_experiment_dispatches_with_same_input_function(
     assert calls == [(input_fn, selected_models)]
 
 
+def test_run_experiment_dispatches_single_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    experiment = cli.Experiment(
+        "test",
+        "test",
+        lambda *, input_fn, model_spec: calls.append((input_fn, model_spec)),
+        model_selection="single",
+    )
+    selected_model = MODEL_SPECS["qwen3-0.6b-q8-0"]
+    monkeypatch.setattr(cli, "choose_experiment", lambda **kwargs: experiment)
+    monkeypatch.setattr(cli, "choose_single_model", lambda **kwargs: selected_model)
+    monkeypatch.setattr(
+        cli,
+        "choose_model_specs",
+        lambda **kwargs: pytest.fail(
+            "single-model experiment must not prompt for a pair"
+        ),
+    )
+    monkeypatch.setattr(cli.sys, "argv", ["run-experiment"])
+
+    def input_fn(_: str) -> str:
+        return ""
+
+    cli.run_experiment(input_fn=input_fn)
+
+    assert calls == [(input_fn, selected_model)]
+
+
 def test_choose_model_accepts_defaults_numbers_and_keys(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -101,6 +131,24 @@ def test_choose_model_retries_invalid_input() -> None:
     assert cli.choose_model("draft", input_fn=lambda _: next(answers)).key == (
         "qwen3-4b-q4-k-m"
     )
+
+
+def test_choose_single_model_uses_neutral_label_and_target_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompts: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    selected = cli.choose_single_model(input_fn=input_fn)
+
+    assert selected.key == DEFAULT_MODEL_KEYS["main"]
+    assert prompts == ["Select model by number or key: "]
+    output = capsys.readouterr().out
+    assert "Available models" in output
+    assert "target" not in output
 
 
 def test_choose_model_specs_allows_cross_role_and_duplicate_selection() -> None:
@@ -127,13 +175,21 @@ def test_vectordb_dispatch_skips_model_selection(
 ) -> None:
     calls: list[object] = []
     experiment = cli.Experiment(
-        "test", "test", lambda *, input_fn: calls.append(input_fn), uses_models=False
+        "test",
+        "test",
+        lambda *, input_fn: calls.append(input_fn),
+        model_selection="none",
     )
     monkeypatch.setattr(cli, "choose_experiment", lambda **kwargs: experiment)
     monkeypatch.setattr(
         cli,
         "choose_model_specs",
         lambda **kwargs: pytest.fail("vectordb must not prompt for models"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "choose_single_model",
+        lambda **kwargs: pytest.fail("vectordb must not prompt for a model"),
     )
     monkeypatch.setattr(cli.sys, "argv", ["run-experiment"])
 

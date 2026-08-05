@@ -63,14 +63,19 @@ def _patch_inference_runtime(module, tmp_path, monkeypatch) -> Question:
     question = Question("q1", "question?", ("category",))
     monkeypatch.setattr(artifacts, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(module, "select_benchmark_questions", lambda count: [question])
-    monkeypatch.setattr(
-        module,
-        "require_models",
-        lambda model_specs=None: {
-            "main": Path("/models/main"),
-            "draft": Path("/models/draft"),
-        },
-    )
+    if module is tooluse:
+        monkeypatch.setattr(
+            module, "validate_model", lambda model_spec: Path("/models/model")
+        )
+    else:
+        monkeypatch.setattr(
+            module,
+            "require_models",
+            lambda model_specs=None: {
+                "main": Path("/models/main"),
+                "draft": Path("/models/draft"),
+            },
+        )
     monkeypatch.setattr(
         module, "llama_server_binary", lambda: ("llama-server", {"build": 9000})
     )
@@ -135,7 +140,7 @@ def test_independent_run_persists_each_model_call(
 def test_tooluse_persists_model_turns_queries_and_results(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    question = _patch_inference_runtime(tooluse, tmp_path, monkeypatch)
+    _patch_inference_runtime(tooluse, tmp_path, monkeypatch)
     environment = SimpleNamespace(
         paths=SimpleNamespace(model_dir=tmp_path / "model", bundle_dir=tmp_path),
         database=SimpleNamespace(
@@ -249,7 +254,9 @@ def test_tooluse_persists_model_turns_queries_and_results(
     tooluse.run(1, 1)
 
     manifest, rows, summary = _run_rows(tmp_path, "tooluse")
-    assert manifest["record_count"] == 2
+    assert manifest["record_count"] == 1
+    assert set(manifest["models"]) == {"model"}
+    assert manifest["models"]["model"]["catalog_key"] == "qwen3-14b-q4-k-m"
     assert manifest["parameters"]["wikipedia"]["points_count"] == 123
     assert manifest["parameters"]["agent_prompt"] == {
         "text": tooluse.SYSTEM_PROMPT,
@@ -259,21 +266,22 @@ def test_tooluse_persists_model_turns_queries_and_results(
         manifest["parameters"]["retrieval"]["database_reset"]
         == "docker_restart_per_benchmark_unit"
     )
-    assert {row["model_role"] for row in rows} == {"main", "draft"}
+    assert [row["model_role"] for row in rows] == ["model"]
     outcome = rows[0]["outcome"]
     assert outcome["llm_calls"][0]["reasoning"] == "find evidence"
     assert outcome["retrieval_calls"][0]["query"].startswith("query-")
     assert outcome["retrieval_calls"][0]["results"][0]["snippet"] == "evidence"
-    assert summary["roles"]["main"]["valid_metrics"]["queries_per_run"]["count"] == 1
-    assert summary["roles"]["main"]["valid_metrics"]["end_to_end_ms"]["mean"] == 10
+    assert set(summary["roles"]) == {"model"}
+    assert summary["roles"]["model"]["valid_metrics"]["queries_per_run"]["count"] == 1
+    assert summary["roles"]["model"]["valid_metrics"]["end_to_end_ms"]["mean"] == 10
     assert (
-        summary["roles"]["main"]["retrieval_metrics"]["qdrant_duration_ms"][
+        summary["roles"]["model"]["retrieval_metrics"]["qdrant_duration_ms"][
             "mean"
         ]
         == 2
     )
-    assert len(restarts) == 2
-    assert len(databases) == 2
+    assert len(restarts) == 1
+    assert len(databases) == 1
 
 
 def test_prefetched_toolcall_persists_target_draft_sync_and_latency(
