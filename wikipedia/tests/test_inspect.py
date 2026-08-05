@@ -543,3 +543,38 @@ def test_open_milvus_leaves_etcd_alone_when_the_bundle_does_not_say(
     inspect._open_milvus(args, _milvus_summary(tmp_path))
 
     assert seen["etcd_dir"] is None
+
+
+def test_benchmark_reports_each_query_as_it_finishes() -> None:
+    """A 10M search off this disk can take many minutes.
+
+    Without per-query reporting the log shows nothing between 'encoder: ready'
+    and the final summary, which is indistinguishable from a hang -- it cost a
+    live diagnosis once.
+    """
+    reported: list[tuple[int, str, float]] = []
+    ticks = iter([0.0, 1.5, 1.5, 2.0])
+
+    inspect.benchmark_query(
+        FakeDatabase(),
+        FakeEncoder(),
+        ["first query", "second query"],
+        limit=1,
+        timer=lambda: next(ticks),
+        on_result=lambda index, query, ms: reported.append((index, query, ms)),
+    )
+
+    assert [(index, query) for index, query, _ in reported] == [
+        (1, "first query"),
+        (2, "second query"),
+    ]
+    assert reported[0][2] == pytest.approx(1500.0)
+
+
+def test_benchmark_without_a_reporter_still_works() -> None:
+    latencies, results = inspect.benchmark_query(
+        FakeDatabase(), FakeEncoder(), ["only query"], limit=1
+    )
+
+    assert len(latencies) == 1
+    assert results

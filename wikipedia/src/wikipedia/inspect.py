@@ -162,6 +162,7 @@ def benchmark_query(
     *,
     limit: int,
     timer: Callable[[], float] = time.perf_counter,
+    on_result: Callable[[int, str, float], None] | None = None,
 ) -> tuple[list[float], list[SearchResult]]:
     """Time one search per query, in order.
 
@@ -181,7 +182,10 @@ def benchmark_query(
     for query in queries:
         started = timer()
         results = search_text(database, encoder, query, limit=limit)
-        latencies.append((timer() - started) * 1000)
+        latency_ms = (timer() - started) * 1000
+        latencies.append(latency_ms)
+        if on_result is not None:
+            on_result(len(latencies), query, latency_ms)
         if not results:
             raise RuntimeError("vector database returned no chunks")
     return latencies, results
@@ -440,13 +444,25 @@ def main(argv: list[str] | None = None) -> None:
             print("encoder: loading BGE-M3", flush=True)
             encoder_started = time.perf_counter()
             encoder = Encoder(summary.paths.bundle_dir, require_complete=False)
-            print(f"encoder: ready in {time.perf_counter() - encoder_started:.1f} s")
-            print(f"queries: {len(queries)} distinct, runs={args.runs}, limit={args.limit}")
+            print(
+                f"encoder: ready in {time.perf_counter() - encoder_started:.1f} s",
+                flush=True,
+            )
+            print(
+                f"queries: {len(queries)} distinct, runs={args.runs}, limit={args.limit}",
+                flush=True,
+            )
             latencies, results = benchmark_query(
                 database,
                 encoder,
                 queries,
                 limit=args.limit,
+                # A cold search on this collection runs for minutes. Without a
+                # line per query the log is silent from here to the summary,
+                # which is indistinguishable from a hang.
+                on_result=lambda index, query, ms: print(
+                    f"  [{index}/{len(queries)}] {ms:9.1f} ms  {query}", flush=True
+                ),
             )
 
         values = ", ".join(f"{value:.1f}" for value in latencies)
