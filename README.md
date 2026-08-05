@@ -570,3 +570,68 @@ No filters, reranking, sparse, or hybrid search are included.
   small and off the query path.
 - **MinIO stores the source binlogs on top of the index**, roughly 21 GB per 1M
   records. Budget it separately from the index.
+
+## 11. Local experiments
+
+```bash
+# Download and verify pinned main and draft GGUF files.
+uv run download-models
+
+# Select an experiment, including prefetched-toolcall, and enter run counts.
+uv run run-experiment
+```
+
+`run-experiment` is intentionally interactive and accepts no arguments. Each
+orchestrator uses Python constants instead of TOML configuration, prepares its
+runtime, prints progress and its final metric table, and stores benchmark records
+under `experiment/results/`:
+
+```text
+experiment/results/<experiment>/<UTC-timestamp>-<short-id>/
+├── manifest.json   # run status, inputs, revisions, and configuration
+├── traces.jsonl    # one fsync'd record per completed benchmark unit
+└── summary.json    # structured form of the final metric report
+```
+
+Trace records include each exact llama.cpp request, reasoning and content output,
+native tool calls, streamed chunks, usage, and timing. Tool-use traces additionally
+include every search query and the exact truncated result snippets returned to the
+model. Warmup calls and llama-server logs are intentionally excluded. Interrupted or
+failed runs retain completed JSONL rows and record the failure in `manifest.json`.
+
+- `parallel` starts Qwen3 14B and 4B servers together, sends paired identical
+  FanOutQA prompts, and reports TTFT plus per-model and combined decode throughput.
+- `independent-run` runs Qwen3 14B and 4B in isolated, non-overlapping server
+  phases with the same prompts and generation settings as `parallel`. It reports
+  per-model TTFT and decode throughput without a combined metric.
+- `tooluse` runs the models in separate phases against Qdrant using Qwen's native,
+  sequential `search` tool calls and a 512-token thinking budget per turn. It
+  reports end-to-end question latency, encoder/Qdrant retrieval latency, generated
+  tokens around queries, zero/one-query regressions, incomplete-run diagnostics,
+  and failure statuses. End-to-end and Qdrant RPC distributions are printed as
+  horizontal ASCII histograms. Each request has a 180-second timeout; each
+  multi-turn question has a separate 600-second timeout.
+- `prefetched-toolcall` runs the 14B target and 4B draft together. The draft
+  receives the target transcript after each completed target retrieval, issues at
+  most one speculative search, and never changes target results. It reports target
+  end-to-end time, role-separated encoder/Qdrant latency, query coverage and overlap,
+  warm-before-use lead time, cancellation/stale-work counts, and LLM contention
+  diagnostics, with ASCII histograms for target end-to-end and target/draft Qdrant
+  RPC latency. Traces retain target outcomes, draft attempts, sync events, and
+  target/draft query associations for comparison with independent runs.
+- `vectordb` runs no LLM. It measures the existing Qdrant collection directly,
+  comparing warmed cache hits with best-effort non-hits after restarting Qdrant before
+  each repetition round. It does not evict the host OS page cache, so later queries may
+  benefit from warming.
+
+Tool-use and prefetched-toolcall require local Docker Qdrant. They restart its
+container before every benchmark unit and open a new client, so no Qdrant process
+cache is reused across runs; target and draft share the freshly restarted backend
+within one prefetched pair. Restart time is excluded from end-to-end latency. Host OS
+page-cache eviction is not performed. Tool-use, prefetched-toolcall, and vector
+experiments accept a paused, partially ingested Wikipedia collection with a warning
+and the current point count, but refuse to measure during active ingestion. The
+`parallel` and `independent-run` experiments have no vector-database dependency.
+Missing GGUF files produce the `uv run download-models` instruction; missing bundle,
+BGE-M3, Docker, Qdrant, or llama.cpp prerequisites similarly produce specific setup
+guidance. Redirect stdout if a durable report is wanted.

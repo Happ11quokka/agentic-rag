@@ -37,3 +37,8 @@ repro/setup/llama.cpp.build/
 
 # Machine-local Wikipedia bundle pointer
 .wikipedia.local.toml
+
+# Local FanOutQA experiment artifacts
+fanoutqa/data/
+experiment/models/
+experiment/results/
