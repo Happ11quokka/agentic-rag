@@ -22,7 +22,7 @@ import httpx
 from fanoutqa.dataset import Question, load_dev, select_questions
 from wikipedia.bundle import BundleError, BundlePaths, load_manifest
 from wikipedia.download import model_is_downloaded
-from wikipedia.milvus import MilvusConfig, MilvusVectorDB
+from wikipedia.milvus import DEFAULT_LOAD_TIMEOUT, MilvusConfig, MilvusVectorDB
 from wikipedia.milvus_runtime import (
     DEFAULT_MILVUS_IMAGE,
     DEFAULT_MILVUS_PROJECT,
@@ -584,7 +584,13 @@ def open_database(environment: WikipediaEnvironment) -> Any:
     across units.
     """
     if backend_name(environment) == "milvus":
-        return MilvusVectorDB(environment.database.config)
+        database = MilvusVectorDB(environment.database.config)
+        # A fresh client is _loaded=False, so its first search would issue
+        # load_collection inside the timer. The collection is already loaded
+        # server-side by now, making this a cheap acknowledgement -- but it has
+        # to happen out here, not inside a measured query.
+        database.load()
+        return database
     return QdrantVectorDB(environment.database.config)
 
 
@@ -680,15 +686,27 @@ def _local_ingestion_processes() -> list[str]:
 def _is_ingest_command(command: str) -> bool:
     """Whether this command is running an ingest, rather than mentioning one.
 
-    Matched on the executable token, not anywhere in the command line. Watching
-    an ingest log is normal while measuring, and a substring match flags every
-    `tail -F ... | grep wikipedia-ingest` as an active writer -- which refuses
-    the run for a process that only reads.
+    Watching an ingest log is normal while measuring, so a reader must not count
+    as a writer. Substring matching gets this wrong, and so does matching any
+    token: ps lists a pipeline's children as their own rows with the shell's
+    quotes already stripped, so `grep ... 'wikipedia-ingest index ready'` shows
+    up as a row whose argv contains the bare token.
+
+    The token therefore only counts where an executable can appear: first on the
+    line, or right after an interpreter or runner that takes one.
     """
-    for token in command.split():
-        if token in {"wikipedia-ingest", "wikipedia.cli"}:
+    tokens = command.split()
+    runners = {"uv", "run", "-m", "exec", "nohup", "env", "sudo", "caffeinate"}
+    for index, token in enumerate(tokens):
+        name = token.rsplit("/", 1)[-1]
+        if name not in {"wikipedia-ingest", "wikipedia.cli", "cli.py"}:
+            continue
+        if name == "cli.py" and "/wikipedia/" not in token:
+            continue
+        if index == 0:
             return True
-        if token.endswith("/wikipedia-ingest") or token.endswith("/wikipedia/cli.py"):
+        previous = tokens[index - 1].rsplit("/", 1)[-1]
+        if previous in runners or previous.startswith("python"):
             return True
     return False
 
@@ -753,6 +771,10 @@ def _open_milvus_bundle(saved: dict[str, Any]) -> Any:
         index_type=str(saved.get("index_type", "DISKANN")),
         search_params={"search_list": int(saved.get("search_list", 100))},
         timeout=float(saved.get("timeout", 60.0)),
+        # The default is sized for the 1M collection. Reading a 10M DiskANN
+        # index off this disk takes hours, and inheriting 1800 s would abort the
+        # load half an hour in.
+        load_timeout=float(saved.get("load_timeout", DEFAULT_LOAD_TIMEOUT)),
     )
     database = MilvusVectorDB(config)
     try:
@@ -770,6 +792,20 @@ def _open_milvus_bundle(saved: dict[str, Any]) -> Any:
                 f"the index in {collection}; those segments are answered by "
                 "brute-force scan, so the measurement would not be of DiskANN"
             )
+        # Load here, not on the first search. MilvusVectorDB.search calls
+        # _load() lazily, so an unloaded collection charges the entire on-disk
+        # index read to whichever query happens to run first -- and the cold
+        # rounds are measured first.
+        print(
+            f"setup: loading Milvus collection (timeout {config.load_timeout:.0f} s)",
+            flush=True,
+        )
+        started = time.perf_counter()
+        database.load()
+        print(
+            f"setup: collection loaded in {time.perf_counter() - started:.1f} s",
+            flush=True,
+        )
     except BaseException:
         database.close()
         raise

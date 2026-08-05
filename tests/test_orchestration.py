@@ -692,7 +692,10 @@ def test_open_database_builds_the_backend_the_bundle_declares(
 ) -> None:
     built: list[str] = []
     monkeypatch.setattr(
-        common, "MilvusVectorDB", lambda config: built.append("milvus") or object()
+        common,
+        "MilvusVectorDB",
+        lambda config: built.append("milvus")
+        or SimpleNamespace(load=lambda: None),
     )
     monkeypatch.setattr(
         common, "QdrantVectorDB", lambda config: built.append("qdrant") or object()
@@ -727,6 +730,9 @@ def test_prepare_wikipedia_opens_a_milvus_bundle(
                 "pending_rows": 8_733_000,
                 "reason": "",
             }
+
+        def load(self):
+            return None
 
         def close(self):
             closed.value = True
@@ -783,6 +789,9 @@ def test_prepare_wikipedia_rejects_a_milvus_collection_with_uncovered_rows(
                 "reason": "",
             }
 
+        def load(self):
+            return None
+
         def close(self):
             return None
 
@@ -809,20 +818,22 @@ def test_ingestion_detection_ignores_a_process_merely_watching_the_log(
 ) -> None:
     """Tailing an ingest log is a normal thing to do while measuring.
 
-    The guard exists to refuse measuring a collection that is being written to.
-    A reader is not a writer, and matching the whole command line flags any
-    `tail -F ... | grep wikipedia-ingest` as an active ingest.
+    ps lists a pipeline's children as their own rows, and by then the shell has
+    stripped the quotes -- so the grep child's argv contains the bare token even
+    though nothing is ingesting. Both rows are fed here because the wrapper row
+    alone passes a substring check that the child row defeats.
     """
-    watcher = (
-        "4721 /bin/zsh -c tail -F wikipedia_diskann_ingest_10m.log | "
-        "grep -E --line-buffered 'wikipedia-ingest index ready'"
+    wrapper = (
+        "18255 /bin/zsh -c tail -F ing.log | grep -E --line-buffered "
+        "'wikipedia-ingest index ready'"
     )
+    child = "18258 grep -E --line-buffered wikipedia-ingest index ready"
     real = "5120 /Users/x/.venv/bin/wikipedia-ingest milvus --bundle-dir /x"
     monkeypatch.setattr(
         common.subprocess,
         "run",
         lambda *a, **k: SimpleNamespace(
-            returncode=0, stdout=f"{watcher}\n{real}\n", stderr=""
+            returncode=0, stdout=f"{wrapper}\n{child}\n{real}\n", stderr=""
         ),
     )
 
@@ -830,3 +841,108 @@ def test_ingestion_detection_ignores_a_process_merely_watching_the_log(
 
     assert len(active) == 1
     assert "wikipedia-ingest milvus" in active[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/Users/x/.venv/bin/wikipedia-ingest milvus --bundle-dir /x",
+        "uv run wikipedia-ingest milvus",
+        "caffeinate -ims uv run wikipedia-ingest qdrant",
+        "/usr/bin/python3 -m wikipedia.cli milvus",
+        "/Users/x/.venv/bin/python3 /Users/x/.venv/bin/wikipedia-ingest milvus",
+    ],
+)
+def test_ingestion_detection_still_catches_a_real_ingest(command: str) -> None:
+    assert common._is_ingest_command(command) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -E --line-buffered wikipedia-ingest index ready",
+        "grep wikipedia-ingest",
+        "ugrep -G -E --line-buffered wikipedia-ingest index ready",
+        "tail -F wikipedia-ingest.log",
+        "less wikipedia.cli",
+    ],
+)
+def test_ingestion_detection_ignores_readers(command: str) -> None:
+    assert common._is_ingest_command(command) is False
+
+def test_milvus_bundle_is_loaded_before_anything_is_timed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Search lazily loads the collection, so an unloaded one bills the load as a query.
+
+    MilvusVectorDB.search calls _load() on first use. Reading a 10M DiskANN index
+    off this disk takes hours, and vectordb measures its cold rounds first, so
+    that cost would land inside the very first latency sample.
+    """
+    paths = BundlePaths.from_dir(tmp_path)
+    loads: list[float] = []
+
+    class Database:
+        def __init__(self, config):
+            self.config = config
+            self.client = SimpleNamespace(has_collection=lambda n, timeout=None: True)
+
+        def index_state(self):
+            return {
+                "index_type": "DISKANN", "state": "Finished",
+                "total_rows": 10_000_000, "indexed_rows": 10_000_000,
+                "pending_rows": 0, "reason": "",
+            }
+
+        def load(self):
+            loads.append(self.config.load_timeout)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(common.BundlePaths, "resolve", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        common, "load_manifest",
+        lambda paths, require_complete: {
+            "status": "complete",
+            "milvus": {
+                "collection": "wikipedia",
+                "uri": "http://localhost:19530",
+                "load_timeout": 36000.0,
+            },
+        },
+    )
+    monkeypatch.setattr(common, "model_is_downloaded", lambda paths: True)
+    monkeypatch.setattr(common, "ensure_milvus", lambda *a, **k: "already running")
+    monkeypatch.setattr(common, "MilvusVectorDB", Database)
+    monkeypatch.setattr(common, "_local_ingestion_processes", lambda: [])
+
+    with common.prepare_wikipedia(stability_seconds=0):
+        pass
+
+    assert loads == [36000.0], "must load once, with the bundle's timeout not the 1M default"
+    assert "loaded" in capsys.readouterr().out
+
+
+def test_each_fresh_milvus_client_is_loaded_outside_the_timed_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """open_database is called per benchmark unit; a fresh client is _loaded=False.
+
+    Without this the first search of every unit pays a load_collection RPC
+    inside the timer, which shows up as one slow query per unit.
+    """
+    loaded: list[bool] = []
+
+    class Database:
+        def __init__(self, config):
+            self.config = config
+
+        def load(self):
+            loaded.append(True)
+
+    monkeypatch.setattr(common, "MilvusVectorDB", Database)
+
+    common.open_database(_milvus_environment())
+
+    assert loaded == [True]
