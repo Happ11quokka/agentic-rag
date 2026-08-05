@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HDD 벡터DB + state-sync prefetch — 실험 보고</title>
+<style>
+:root{
+  --bg:#0d0f14; --bg2:#161922; --bg3:#1a2030; --line:#2a2f3d;
+  --tx:#e8e8ea; --tx2:#b8c2db; --tx3:#8693b3;
+  --blue:#2c5cff; --blue2:#6ea8ff; --green:#5ae0a3; --amber:#ffa45e; --red:#ff7575;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:64px}
+body{
+  background:var(--bg); color:var(--tx);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Noto Sans KR","Apple SD Gothic Neo",sans-serif;
+  font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1120px;margin:0 auto;padding:0 4vw}
+section{padding:4rem 0 1rem}
+section:first-of-type{padding-top:2.5rem}
+.hero{background:radial-gradient(ellipse at 15% 0%,#1a2548 0%,#0d0f14 60%);padding:3.4rem 0 2.6rem;border-bottom:1px solid var(--line)}
+h1{font-size:2.3rem;font-weight:800;color:#fff;letter-spacing:-.025em;line-height:1.25}
+.hero .meta{color:var(--tx3);font-size:.86rem;margin-top:.8rem;letter-spacing:.02em}
+.hero .sub{color:var(--tx2);font-size:1.06rem;margin-top:1.1rem;max-width:860px}
+h2.sec{font-size:1.9rem;font-weight:700;color:#fff;letter-spacing:-.02em;display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap}
+h2.sec .part{font-size:.72rem;font-weight:700;color:var(--blue2);letter-spacing:.18em;background:rgba(44,92,255,.14);padding:.28em .7em;border-radius:999px}
+h2.sec + .lead{color:var(--tx2);margin:.7rem 0 1.6rem;font-size:1.05rem;max-width:860px}
+h3{color:#fff;font-size:1.18rem;margin:1.8rem 0 .8rem;font-weight:650;letter-spacing:-.01em}
+h4{color:#fff;font-size:1rem;margin:1.2rem 0 .5rem;font-weight:650}
+p{margin:.7rem 0}
+strong,b{color:#fff}
+a{color:var(--blue2)}
+code{background:#0a0c11;border:1px solid var(--line);border-radius:4px;padding:.05em .4em;font-size:.86em;color:#cdd6f0}
+ul,ol{margin:.7rem 0 .7rem 1.2rem}
+li{margin:.35rem 0}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin:1.4rem 0}
+@media(max-width:780px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{background:linear-gradient(135deg,#1a2548 0%,#161922 100%);border:1px solid #2c5cff55;border-radius:12px;padding:1.3rem}
+.stat .n{font-size:2rem;font-weight:800;color:var(--blue2);line-height:1;letter-spacing:-.02em}
+.stat .n.green{color:var(--green)} .stat .n.amber{color:var(--amber)} .stat .n.red{color:var(--red)}
+.stat .l{font-size:.85rem;color:var(--tx2);margin-top:.45rem;font-weight:600}
+.stat .s{font-size:.76rem;color:var(--tx3);margin-top:.3rem;line-height:1.45}
+.bignum{background:linear-gradient(135deg,#16321f 0%,#161922 100%);border:1px solid #2ca02c66;border-radius:12px;padding:1.6rem 1.5rem;margin:1.4rem 0}
+.bignum .n{font-size:3.4rem;font-weight:800;color:var(--green);line-height:1;letter-spacing:-.03em}
+.bignum .l{color:var(--tx2);margin-top:.6rem;font-size:.95rem}
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:1.2rem 1.4rem;margin:1rem 0}
+.card.ours{border-left:4px solid var(--green)}
+.card.paper{border-left:4px solid var(--blue2)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:1.1rem;margin:1.2rem 0}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+.callout{border-radius:0 8px 8px 0;padding:1rem 1.3rem;margin:1.2rem 0;font-size:.93rem}
+.callout .lab{font-weight:700;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;display:block;margin-bottom:.35rem}
+.callout.blue{background:rgba(44,92,255,.1);border-left:4px solid var(--blue)} .callout.blue .lab{color:var(--blue2)}
+.callout.green{background:rgba(90,224,163,.08);border-left:4px solid var(--green)} .callout.green .lab{color:var(--green)}
+.callout.amber{background:rgba(255,164,94,.08);border-left:4px solid var(--amber)} .callout.amber .lab{color:var(--amber)}
+.callout.red{background:rgba(255,117,117,.08);border-left:4px solid var(--red)} .callout.red .lab{color:var(--red)}
+.tblwrap{overflow-x:auto;margin:1rem 0}
+.tbl{width:100%;border-collapse:collapse;font-size:.9rem;background:var(--bg2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.tbl th,.tbl td{padding:.65rem .9rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.tbl th{background:var(--bg3);color:var(--tx2);font-size:.78rem;letter-spacing:.04em;text-transform:uppercase;font-weight:700}
+.tbl tr:last-child td{border-bottom:none}
+.tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
+.tbl .pass{color:var(--green);font-weight:700}
+.tbl .partial{color:var(--amber);font-weight:700}
+.tbl .fail{color:var(--red);font-weight:700}
+.arch{background:#0a0c11;border:1px solid var(--line);border-radius:12px;padding:1.2rem 1.4rem;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:.82rem;color:var(--tx2);overflow-x:auto;line-height:1.7;white-space:pre;margin:1.1rem 0}
+.term{background:#0a0c11;border:1px solid var(--line);border-radius:9px;padding:.7rem .9rem;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:.82rem;color:#cdd6f0;overflow-x:auto;white-space:pre;margin:.9rem 0;line-height:1.6}
+.pill{display:inline-block;font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:.24em .7em;border-radius:999px;border:1px solid var(--line);color:var(--tx3);background:var(--bg3)}
+.pill.done{color:var(--green);border-color:#5ae0a355;background:rgba(90,224,163,.1)}
+.pill.blocked{color:var(--red);border-color:#ff757555;background:rgba(255,117,117,.1)}
+.pill.wip{color:var(--amber);border-color:#ffa45e55;background:rgba(255,164,94,.1)}
+footer{border-top:1px solid var(--line);margin-top:3rem;padding:2rem 0 3rem;color:var(--tx3);font-size:.84rem}
+.fn{color:var(--tx3);font-size:.83rem;margin-top:.5rem}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>HDD 벡터DB 위에서 state-sync prefetch</h1>
+    <div class="meta">2026-08-05 · 브랜치 <code>wikipedia_hdd</code> · Milvus 2.5.27 DiskANN · 10,000,000 rows · 외장 USB HDD</div>
+    <p class="sub">
+      10M 벡터DB를 HDD에 올려 검색 지연을 실측하고, Target 모델이 검색할 때마다 상태를 동기화해
+      다음 검색을 미리 실행하는 prefetch 로직을 구현했다. <b>검색 지연 측정은 완료됐고, 그 값이
+      prefetch의 상한을 2% 미만으로 만든다.</b> 쌍대 실험은 인프라 한계로 아직 완주하지 못했다.
+    </p>
+  </div>
+</div>
+
+<div class="wrap">
+
+<section>
+  <h2 class="sec"><span class="part">SUMMARY</span>한눈에</h2>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="n">10,000,000</div>
+      <div class="l">적재 완료 · DiskANN</div>
+      <div class="s">indexed_rows = total_rows. 로드·검색 모두 확인</div>
+    </div>
+    <div class="stat">
+      <div class="n amber">295 s</div>
+      <div class="l">검색 지연 중앙값</div>
+      <div class="s">질의 10개, 콜드 386 s. 워밍업 효과 없음</div>
+    </div>
+    <div class="stat">
+      <div class="n red">&lt; 2%</div>
+      <div class="l">prefetch 회수 상한</div>
+      <div class="s">min(retrieval, decode) ÷ retrieval</div>
+    </div>
+    <div class="stat">
+      <div class="n green">157</div>
+      <div class="l">테스트 통과</div>
+      <div class="s">prefetch 로직 + 로드 경로</div>
+    </div>
+  </div>
+
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>목표</th><th>상태</th><th>내용</th></tr>
+    <tr>
+      <td>① 벡터DB 적재 확인</td>
+      <td><span class="pill done">완료</span></td>
+      <td>10M rows / DISKANN / indexed = total. 로드까지 성공하고 검색 지연을 실측</td>
+    </tr>
+    <tr>
+      <td>② state-sync prefetch 로직</td>
+      <td><span class="pill done">완료</span></td>
+      <td><code>wikipedia/src/wikipedia/prefetch.py</code> · 테스트 157개</td>
+    </tr>
+    <tr>
+      <td>③ 쌍대 실험 실행</td>
+      <td><span class="pill blocked">미완</span></td>
+      <td>Docker Desktop 파일공유 서비스가 3회 사망. 아직 수치 없음</td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="callout amber">
+    <span class="lab">⚠️ 이 문서가 보여주지 않는 것</span>
+    <b>prefetch의 hit rate·숨긴 시간 수치는 아직 없다.</b> 쌍대 실험이 완주하지 못했다.
+    아래 3부는 <i>무엇을 만들었고 왜 그렇게 만들었는지</i>이고, 실측은 검색 지연(2부)뿐이다.
+  </div>
+</section>
+
+<section>
+  <h2 class="sec"><span class="part">PART 1</span>실험이 돌아가게 만들기</h2>
+  <p class="lead">
+    적재는 이미 끝나 있었다. 문제는 <b>로드가 안 됐다</b>는 것이고, 에러 메시지가 스스로를
+    잘못 설명하고 있었다. 네 겹이었다.
+  </p>
+
+  <div class="term">load segment failed, OOM if load, maxSegmentSize = 128.81 MB,
+memUsage = 26192.19 MB, predictMemUsage = 26321.00 MB,
+totalMem = 28020.16 MB thresholdFactor = 0.900000</div>
+
+  <h3>① <code>memUsage</code>의 90%는 메모리가 아니었다</h3>
+  <p>
+    Milvus는 이 값을 <code>GetUsedMemoryCount() + committedResource.MemorySize</code>로 계산한다.
+    자기 로그에 두 항을 따로 찍어 준다.
+  </p>
+  <div class="term">[committedMemSize(MB)=23641.75] [memUsage(MB)=26192.19] [mmapFieldCount=6]
+→ 실제 프로세스 메모리 = 26192.19 − 23641.75 = 2,550 MB</div>
+  <p>
+    <b>23.6 GB는 진행 중인 세그먼트 로드가 잡아 둔 예약치</b>다. 세그먼트당 약 128 MiB인데
+    이것도 DiskANN의 실제 메모리가 아니라 다운로드 버퍼 하한이다. 예약은 로드가 <i>끝나야</i>
+    반납되는데, 로그를 시계열로 보면 <b>0.31초 만에 176개를 승인해 놓고 하나도 못 끝냈다.</b>
+    승인 게이트 <code>queryCoord.taskExecutionCap</code>의 기본값이 256이다.
+  </p>
+
+  <h3>② "601초"는 OOM이 아니라 취소였다</h3>
+  <p>
+    <code>queryCoord.loadTimeoutSeconds</code> 기본값이 600이고, 로그에
+    <code>["load collection timeout, cancel it"] [loadTime=10m0.45s]</code>가 찍혀 있다.
+    화면에 뜬 OOM 문자열은 <code>FailedLoadCache</code>가 들고 있던 <b>직전 실패의 잔상</b>을
+    <code>ShowCollections</code>가 되읽은 것이었다. 증상을 원인으로 읽고 있었다.
+  </p>
+
+  <h3>③ 그다음은 세그먼트 하나짜리 데드라인</h3>
+  <p>
+    ①②를 고치자 세그먼트가 실제로 완료되기 시작했는데, 5분 뒤 로드가 통째로 풀렸다.
+    <code>At LoadBloomFilter: ... context canceled</code> → <code>release collection due to ref count to 0</code>.
+    <code>segmentTaskTimeout</code> 기본값이 <b>120초</b>인데 이 디스크에서 세그먼트 하나 로드가
+    14분 26초 걸린 적이 있다.
+  </p>
+
+  <h3>④ etcd가 스택을 죽이고 있었다</h3>
+  <p>
+    컨테이너가 <code>exit=1</code>, <code>OOMKilled=false</code>로 죽은 건 메모리가 아니라
+    <b>etcd 세션 상실</b>이었다. etcd는 쓰기마다 fsync하는데 로드가 HDD를 포화시키면 리스 갱신이
+    밀린다. DEVLOG 7절이 "규모를 키웠을 때 나타나면"이라고 적어 둔 리스크가 그대로 나타났다.
+    etcd 볼륨(66 MB)만 내장 SSD로 옮겼다 — 인덱스는 HDD에 그대로다.
+  </p>
+
+  <h4>최종 설정</h4>
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>설정</th><th class="num">기본값</th><th class="num">현재</th><th>이유</th></tr>
+    <tr><td><code>queryCoord.taskExecutionCap</code></td><td class="num">256</td><td class="num">4</td><td>예약치 누적을 막는다. 적용 후 committed 23,642 MB → 515 MB</td></tr>
+    <tr><td><code>queryCoord.loadTimeoutSeconds</code></td><td class="num">600</td><td class="num">36,000</td><td>느린 매체에서 진행이 멈춘 걸로 오판해 취소</td></tr>
+    <tr><td><code>queryCoord.segmentTaskTimeout</code></td><td class="num">120,000</td><td class="num">3,600,000</td><td>세그먼트 하나가 2분 안에 안 끝난다</td></tr>
+    <tr><td><code>queryCoord.channelTaskTimeout</code></td><td class="num">60,000</td><td class="num">600,000</td><td>같은 문제, 채널 구독</td></tr>
+    <tr><td><code>...overloadedMemoryThresholdPercentage</code></td><td class="num">90</td><td class="num">95</td><td>여유분. 단독으로는 아무것도 못 고친다</td></tr>
+    <tr><td><code>common.diskIndex.searchCacheBudgetGBRatio</code></td><td class="num">0.10</td><td class="num">0.10</td><td>한때 0.01로 조였다가 되돌림 (5부 참조)</td></tr>
+    <tr><td>Docker VM 메모리</td><td class="num">28,672 MiB</td><td class="num">22,528 MiB</td><td>VM과 BGE-M3 인코더가 36 GB 호스트에 같이 못 들어간다</td></tr>
+  </table>
+  </div>
+
+  <div class="callout blue">
+    <span class="lab">🧭 효과 없는 것으로 확인된 안</span>
+    <b>페이지 캐시 드롭</b> — <code>GetUsedMemoryCount()</code>는 statm의 <code>RSS − Shared</code>라
+    file-backed 페이지가 구조적으로 빠진다. 6.5 GB를 비워도 익명 RSS 변화 0 kB.
+    <b><code>mem_limit</code></b> — Milvus가 <code>min(cgroup, physical)</code>을 쓰므로 천장을 <i>낮추기만</i> 한다.
+    <b>mmap 플래그로 DiskANN 제어</b> — DiskANN 인덱스는 항상 로컬로 내려받고 PQ 코드를 램에 둔다.
+    mmap은 스칼라 payload에만 걸린다(<code>enable_mmap=false</code> 확인).
+  </div>
+</section>
+
+<section>
+  <h2 class="sec"><span class="part">PART 2</span>state-sync prefetch 로직</h2>
+  <p class="lead">
+    Target 모델이 <b>검색할 때마다</b> 그 시점의 상태를 drafter에 동기화하고, drafter가 예측한
+    다음 검색어를 미리 실행해 캐시에 넣는다. 다음 hop에서 실제 검색어가 예측과 같으면 대기가 0이 된다.
+  </p>
+
+  <h3>seam은 호출 하나</h3>
+  <div class="arch">results = retriever.retrieve(query, state)
+
+  ├─ 1. 캐시 조회          normalize(query) 로 키를 만들어 찾는다
+  ├─ 2. hit  → 캐시 반환    아직 실행 중이면 재시작하지 않고 <b>기다린다</b>
+  │     miss → 실제 검색
+  └─ 3. sync + spawn       state + (query, observation) 을 drafter 에 넘기고
+                           예측된 다음 검색을 백그라운드로 실행</div>
+
+  <p>
+    <b>동기화를 "검색의 부수효과"로 만든 것이 설계의 핵심이다.</b> 별도의 <code>sync()</code>
+    호출을 두면 agent 루프의 어느 분기에서 빠뜨릴 수 있고, 그러면 그 hop만 조용히 baseline으로
+    돌아간다 — 측정 기록에는 "prefetch 켜짐"이라고 남은 채로. 호출을 하나로 묶으면 그 실패 모드가
+    구조적으로 불가능하다.
+  </p>
+
+  <div class="grid2">
+    <div class="card ours">
+      <h4>왜 검색 <i>완료</i> 시점인가</h4>
+      <p style="font-size:.93rem">
+        다음 검색어를 예측하는 가장 강한 입력은 <b>observation</b>인데, 그건 검색이 끝나야 존재한다.
+        검색 <i>시작</i> 시점에 걸면 prefetch가 target 자신의 검색과 <b>같은 디스크를 동시에</b> 때린다.
+        이 HDD에서 희소 자원은 랜덤 IOPS(실측 78 tps)다.
+      </p>
+    </div>
+    <div class="card ours">
+      <h4>완료 시점 = decode와 겹침</h4>
+      <p style="font-size:.93rem">
+        target이 다음 Thought를 생성하는 동안 디스크는 유휴다. 이 구간에 prefetch를 넣는 것이
+        PLAN.md 5.1절의 상한 <code>hidden ≤ min(retrieval, decode)</code>와 정확히 대응한다.
+      </p>
+    </div>
+  </div>
+
+  <h3>무결성 — 정확도가 움직일 수 없는 이유</h3>
+  <p>
+    캐시는 <b>예측 문자열이 실제 질의와 정확히 같을 때만</b> 쓴다. 불일치면 기존 경로를 그대로 탄다.
+    따라서 반환 passage가 baseline과 동일하고, prefetch는 <b>언제 검색하느냐</b>만 바꾼다.
+  </p>
+
+  <div class="callout red">
+    <span class="lab">🐛 이 보고를 쓰다가 잡은 버그</span>
+    처음 구현은 <b>정규화된 키</b>만 보고 캐시를 내줬다. 그런데 prefetch는 자기가 <i>예측한</i>
+    문자열을 임베딩한다. BGE-M3는 대소문자·공백에 민감하므로
+    <code>"Aurora  Borealis"</code>와 <code>"aurora borealis"</code>는 <b>다른 벡터 → 다른 passage</b>가
+    될 수 있는데, 키는 같아서 hit으로 처리됐다. 정확도 불변이 조용히 깨지는 구멍이고,
+    <b>테스트가 그 동작을 고정해 두기까지 했다.</b> 지금은 entry에 원문을 저장하고
+    <b>원문 동일성</b>을 요구한다. 정규화는 "같은 예측으로 중복 검색하지 않는다"는 원래 역할만 남았다.
+  </div>
+
+  <h3>무엇을 정직하게 기록하는가</h3>
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>값</th><th>정의</th><th>왜 필요한가</th></tr>
+    <tr><td><code>hidden_ms</code></td><td><code>prefetch_ms − wait_ms</code></td><td>실행 중인 prefetch를 재시작하지 않고 <b>기다리므로</b> 이 뺄셈이 정직하다</td></tr>
+    <tr><td><code>contended</code></td><td>miss인데 prefetch가 아직 디스크를 쓰는 중</td><td>빗나간 예측이 target의 실제 검색과 <b>같은 HDD를 다툰다.</b> PLAN.md의 contention tax에 대응</td></tr>
+    <tr><td><code>wasted</code></td><td>끝까지 안 쓰인 prefetch 검색 수</td><td>순손실 계산의 분자</td></tr>
+  </table>
+  </div>
+  <p class="fn">순절감 = Σ hidden_ms − (빗나간 prefetch가 유발한 지연). 적중률이 낮으면 음수가 될 수 있고, 그대로 보고한다.</p>
+
+  <div class="callout amber">
+    <span class="lab">⚠️ ReplayPredictor는 drafter가 아니다</span>
+    현재 머신에 target/drafter 모델이 없다(AgentBench·llama.cpp·GGUF 모두 부재). 그래서 예측기는
+    에피소드의 검색어 순서를 그대로 재생하는 <code>ReplayPredictor</code>다. 이건 <b>기구의 상한</b>이지
+    적중률 측정이 아니다 — 구성상 항상 맞힌다. <code>--wrong-hops</code>로 일부러 빗나가게 해
+    miss·contention 경로도 밟게 하고, <code>--think-seconds</code>로 실제 모델이 쓸 추론 시간을 물린다.
+    서버가 생기면 <code>HTTPPredictor</code>(OpenAI 호환, llama-server·Ollama 양쪽)가 그대로 붙는다.
+  </div>
+</section>
+
+<section>
+  <h2 class="sec"><span class="part">PART 3</span>이번 실험 — 검색 지연 실측</h2>
+  <p class="lead">
+    로드 완료 후 <b>서로 다른</b> 질의 10개. 같은 질의를 반복하면 2회차부터 페이지 캐시를 재게 되므로
+    질의를 재사용하면 오류를 내도록 강제돼 있다.
+  </p>
+
+  <div class="term">latency_ms: [386041.7, 296698.2, 330992.7, 299184.4, 290625.3,
+             293653.7, 255079.9, 265980.1, 328232.4, 271726.7]
+summary: runs=10, cold=386041.7 ms, mean=301821.5 ms, median=295175.9 ms,
+         min=255079.9 ms, max=386041.7 ms</div>
+
+  <div class="bignum">
+    <div class="n">4.3 – 6.4분</div>
+    <div class="l">10M DiskANN · USB HDD 위 검색 1회. 질의 10개 전부 이 범위 안에 있다.</div>
+  </div>
+
+  <h3>핵심은 "워밍업이 없다"는 것</h3>
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th></th><th>1M 부분집합 (08-03)</th><th>10M (08-05)</th></tr>
+    <tr><td>콜드 1회차</td><td class="num">17.7 s</td><td class="num">386 s</td></tr>
+    <tr><td>이후 질의</td><td class="num partial">71–80 ms †</td><td class="num">255–331 s</td></tr>
+    <tr><td>워밍업 효과</td><td class="pass">있음</td><td class="fail">없음</td></tr>
+  </table>
+  </div>
+  <p class="fn">
+    † 이 값은 <b>이미 철회된 수치</b>다. 당시 벤치마크가 <i>같은 질의</i>를 10회 반복해서, 2회차부터는
+    검색이 아니라 페이지 캐시를 잰 것이었다. 1M 수치는 DEVLOG 기록으로만 남아 있고 원본 로그는 없다.
+    10M 수치와 같은 선상에 놓고 비교하면 안 된다.
+  </p>
+
+  <p>
+    10회차(272 s)가 2회차(297 s)보다 빠르지 않다. 로컬 인덱스 <b>93 GB</b>가 VM 22 GB를 압도해
+    캐시가 들어설 자리가 없기 때문이다. 검색 내내 디스크는 <b>78 tps · 약 25 KB/transfer</b>,
+    즉 랜덤 읽기 IOPS 상한에 붙어 있었다.
+  </p>
+
+  <div class="callout green">
+    <span class="lab">✅ 이게 좋은 소식인 이유</span>
+    DEVLOG 7절이 <i>"1M 부분집합은 최종 구성이 아니다 — 워킹셋이 캐시에 들어가면 HDD 처치가 약해진다"</i>고
+    적어 뒀다. 10M에서 <b>처치가 실제로 살아 있음이 확인됐다.</b> Qdrant HNSW로 48분에도 안 끝나던
+    검색이 5분에 끝나고, 그 5분은 캐시로 지워지지 않는 진짜 매체 비용이다.
+  </div>
+</section>
+
+<section>
+  <h2 class="sec"><span class="part">PART 4</span>그런데 이 값은 prefetch에게 나쁜 소식이다</h2>
+  <p class="lead">
+    PLAN.md 5.1절의 상한을 그대로 적용하면 결론이 바로 나온다.
+    <code>hidden ≤ min(retrieval, decode)</code>.
+  </p>
+
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>retrieval</th><th>decode (8B 모델이 Thought 하나)</th><th class="num">숨김 상한</th><th class="num">회수율</th></tr>
+    <tr><td class="num">295 s</td><td class="num">약 2–5 s</td><td class="num">2–5 s</td><td class="num fail">0.7 – 1.7%</td></tr>
+    <tr><td class="num">1 s</td><td class="num">1 s</td><td class="num">1 s</td><td class="num pass">50%</td></tr>
+  </table>
+  </div>
+
+  <p>
+    <b>지금 구성에서 prefetch로 회수할 수 있는 비율은 2% 미만이다.</b> 5.1절이
+    <i>"검색이 decode보다 압도적으로 느리면 회수율은 0에 수렴한다 — 이건 강한 처치가 아니라 고장"</i>이라고
+    적어 둔 바로 그 구간이다. 47M/Qdrant의 "48분에도 미완료"에서 5분으로 내려온 건 큰 진전이지만,
+    <b>의미 있는 구간(<code>retrieval ≈ decode</code>, 초 단위)에는 아직 못 왔다.</b>
+  </p>
+
+  <div class="callout blue">
+    <span class="lab">🧪 그래서 쌍대 실험은 decode 간격을 측정된 중앙값에 맞춘다</span>
+    임의의 값(예: 2초)을 넣으면 "1.7% 회수"라는 <b>그 임의값에 대한 산수</b>를 보고하게 된다.
+    decode를 295초로 맞추는 것은 현실적인 에이전트를 흉내내는 게 아니라
+    <i>decode가 retrieval만큼 길다면 기구가 실제로 숨기는가</i>를 재는 것 —
+    <b>기구의 상한 검증이지 운영 조건의 재현이 아니다.</b>
+  </div>
+
+  <h3>다음은 규모가 아니라 매체·구성이다</h3>
+  <p><code>retrieval</code>을 초 단위로 내리려면 셋 중 하나이고, 셋 다 대가가 명시적이다.</p>
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>안</th><th>대가</th></tr>
+    <tr><td>SSD 대조군 구축</td><td>대조군이지 처치가 아니다. 다만 비교의 다른 쪽 끝이 필요하다</td></tr>
+    <tr><td><code>search_list</code> 축소</td><td>recall이 바뀌어 대조군과 비교 불가</td></tr>
+    <tr><td>코퍼스 축소</td><td>워킹셋이 캐시에 들어가면 HDD 처치가 다시 약해진다</td></tr>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2 class="sec"><span class="part">PART 5</span>막힌 지점 — Milvus가 아니라 Docker</h2>
+  <p class="lead">
+    지연 측정 직후 쌍대 실험을 돌리자 Docker 엔진이 죽었다. 메모리가 아니었다(호스트 여유 83%).
+    Docker 자체 로그에 원인이 있다.
+  </p>
+
+  <div class="term">"error":"service fs failed: injecting event blocked for 60s"</div>
+
+  <p>
+    <code>fs</code>는 <code>/Volumes/agentic_rag/...</code>를 VM 안으로 넣어 주는
+    <b>파일공유(virtiofs) 서비스</b>다. 이 서비스가 60초 블로킹되면 워치독이 죽이고 엔진이 같이 내려간다.
+    검색이 USB HDD를 IOPS 상한으로 계속 때리면 이 문턱을 넘는다.
+  </p>
+
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>사망</th><th>시점</th><th>원인</th></tr>
+    <tr><td>1회</td><td>로드 완료 직후 첫 검색</td><td>호스트 스왑 소진 (25,423 / 26,624 MB) — VM 28 GB + 인코더가 36 GB에 안 들어감</td></tr>
+    <tr><td>2회</td><td>쌍대 실험 중</td><td><code>service fs failed</code> — 파일공유 워치독</td></tr>
+    <tr><td>3회</td><td>재적재 25분 경과</td><td>VM 응답 불능 → 고아 VM kill 후 복구</td></tr>
+  </table>
+  </div>
+
+  <div class="callout red">
+    <span class="lab">💸 재시작 1회 = 5시간</span>
+    Milvus는 로컬 스토리지를 <b>자기가 소유한 캐시</b>로 보고 기동 때 비운다
+    (<code>roles.go: "Clean local data cache"</code>). 재시작 직후 <b>93 GB → 6.2 GB</b>.
+    DiskANN 인덱스를 MinIO에서 다시 받아야 하는데 MinIO도 <b>같은 HDD</b>에 있다.
+    세그먼트당 로드가 로컬에 파일이 있을 때 약 2분, 콜드로 다시 받으면 <b>7–9분</b>.
+    <b>컨테이너를 다시 만드는 모든 행위</b>(compose 값 변경, Docker 재시작, VM 크기 변경)가
+    5시간짜리 재적재를 부른다.
+  </div>
+
+  <p>
+    <b>이건 이 실험 플랫폼의 구조적 제약이지 설정 실수가 아니다.</b> 인덱스가 bind mount 위에 있으므로
+    검색 경로 <i>전체</i>가 이 계층을 통과한다. 남은 선택지는 파일공유 구현 교체(gRPC FUSE),
+    동시 읽기 축소(<code>beamWidthRatio</code>), 또는 처치를 포기하고 인덱스를 SSD로 옮기는 것이다.
+  </p>
+
+  <h3>한 가지 되돌린 결정</h3>
+  <p>
+    <code>searchCacheBudgetGBRatio</code>를 <b>0.01 → 0.10</b>(Milvus 기본값)으로 되돌렸다.
+    캐시를 기본값의 1/10로 조인 건 "아무도 그렇게 안 쓴다"는 문제에 걸리는데,
+    이 프로젝트가 Qdrant 양자화 안을 기각한 논거가 정확히 그것(<i>실제로 운용되는 구성이 아니다</i>)이었다.
+    저장매체는 HDD 그대로이고 디스크 큐만 낮아진다.
+  </p>
+  <p class="fn">
+    다만 <b>0.01에서 잰 수치(콜드 386 s / 중앙값 295 s)와 이후 수치는 서로 다른 구성</b>이므로
+    직접 비교하면 안 된다. 3부의 값은 0.01 조건에서 측정된 것이다.
+  </p>
+</section>
+
+<section>
+  <h2 class="sec"><span class="part">APPENDIX</span>재현</h2>
+
+  <div class="term"># 적재 (10샤드 ≈ 1M / 100샤드 ≈ 10M)
+uv run wikipedia-ingest milvus --bundle-dir /Volumes/agentic_rag/wikipedia_diskann \
+  --max-shards 100 --disable-xet --download-timeout 30 --milvus-truncate-text
+
+# 검색 지연 — 매 실행마다 다른 질의, 질의 재사용은 오류
+uv run wikipedia-inspect --backend milvus --runs 10 --search-list 100 --load-timeout 36000
+
+# 쌍대 prefetch 실험 (decode 간격은 측정된 중앙값에 맞춘다)
+uv run wikipedia-prefetch --episodes 3 --decode-seconds 295 \
+  --think-seconds 0.4 --wrong-hops 2 --json out.json
+
+# 재시작 없이 튜닝 — refreshable 설정은 etcd 로
+docker exec wikipedia-milvus-etcd \
+  etcdctl put "by-dev/config/queryCoord.taskExecutionCap" "16"
+
+# 로드 중 실제 메모리는 로그가 아니라 프로세스에서 읽는다
+docker exec wikipedia-milvus sh -c 'grep RssAnon /proc/8/status'</div>
+
+  <div class="tblwrap">
+  <table class="tbl">
+    <tr><th>문서 / 코드</th><th>내용</th></tr>
+    <tr><td><code>repro/experiments/wikipedia_hdd/DEVLOG.md</code></td><td>전체 개발로그. 기각된 가설과 그 근거 포함</td></tr>
+    <tr><td><code>repro/experiments/decode_rag_prefetch/STATE_SYNC_DESIGN.md</code></td><td>이 prefetch 설계의 근거와 채택하지 않은 안</td></tr>
+    <tr><td><code>wikipedia/src/wikipedia/prefetch.py</code></td><td>캐시 · 상태 스냅샷 · 예측기 · 회계</td></tr>
+    <tr><td><code>wikipedia/src/wikipedia/prefetch_bench.py</code></td><td>쌍대 드라이버. arm 순서 교대, passage 비교</td></tr>
+    <tr><td><code>wikipedia/src/wikipedia/milvus_runtime.py</code></td><td>compose 템플릿. 1부의 설정이 전부 여기 있다</td></tr>
+  </table>
+  </div>
+</section>
+
+<footer>
+  <div>
+    브랜치 <code>wikipedia_hdd</code> · 검색 지연은 <code>wikipedia_diskann_prefetch_10m.log</code>에서 측정.
+    1M 비교 수치는 DEVLOG 기록으로만 존재하며 원본 로그가 남아 있지 않다.
+  </div>
+  <div style="margin-top:.6rem">
+    쌍대 실험 수치는 아직 없다. 이 문서에 hit rate·숨긴 시간이 적혀 있지 않은 것은 누락이 아니라 <b>측정되지 않았기 때문</b>이다.
+  </div>
+</footer>
+
+</div>
+</body>
+</html>
