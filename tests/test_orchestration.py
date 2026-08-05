@@ -802,3 +802,31 @@ def test_prepare_wikipedia_rejects_a_milvus_collection_with_uncovered_rows(
 
     with pytest.raises(ExperimentError, match="not covered by the index"):
         common.prepare_wikipedia(stability_seconds=0)
+
+
+def test_ingestion_detection_ignores_a_process_merely_watching_the_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tailing an ingest log is a normal thing to do while measuring.
+
+    The guard exists to refuse measuring a collection that is being written to.
+    A reader is not a writer, and matching the whole command line flags any
+    `tail -F ... | grep wikipedia-ingest` as an active ingest.
+    """
+    watcher = (
+        "4721 /bin/zsh -c tail -F wikipedia_diskann_ingest_10m.log | "
+        "grep -E --line-buffered 'wikipedia-ingest index ready'"
+    )
+    real = "5120 /Users/x/.venv/bin/wikipedia-ingest milvus --bundle-dir /x"
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout=f"{watcher}\n{real}\n", stderr=""
+        ),
+    )
+
+    active = common._local_ingestion_processes()
+
+    assert len(active) == 1
+    assert "wikipedia-ingest milvus" in active[0]

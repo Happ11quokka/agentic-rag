@@ -672,10 +672,25 @@ def _local_ingestion_processes() -> list[str]:
         parts = stripped.split(maxsplit=1)
         if len(parts) != 2 or not parts[0].isdigit() or int(parts[0]) == current:
             continue
-        command = parts[1]
-        if "wikipedia-ingest" in command or "wikipedia.cli" in command:
+        if _is_ingest_command(parts[1]):
             active.append(stripped)
     return active
+
+
+def _is_ingest_command(command: str) -> bool:
+    """Whether this command is running an ingest, rather than mentioning one.
+
+    Matched on the executable token, not anywhere in the command line. Watching
+    an ingest log is normal while measuring, and a substring match flags every
+    `tail -F ... | grep wikipedia-ingest` as an active writer -- which refuses
+    the run for a process that only reads.
+    """
+    for token in command.split():
+        if token in {"wikipedia-ingest", "wikipedia.cli"}:
+            return True
+        if token.endswith("/wikipedia-ingest") or token.endswith("/wikipedia/cli.py"):
+            return True
+    return False
 
 
 def _collection_points(database: QdrantVectorDB) -> int:
