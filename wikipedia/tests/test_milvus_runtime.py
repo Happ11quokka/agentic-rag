@@ -189,6 +189,59 @@ def test_compose_file_can_put_etcd_on_a_different_disk() -> None:
     assert "- ./volumes/milvus:/var/lib/milvus" in rendered, "index must stay put"
 
 
+def test_compose_file_can_put_etcd_on_a_named_volume() -> None:
+    """A named volume takes etcd off host file sharing entirely.
+
+    Both file-sharing implementations starve etcd under a sustained index
+    write: virtiofs blocks its service, grpcfuse serialises every share
+    through one host fileserver. Either way etcd misses its lease renewal and
+    every Milvus role logs "connection lost detected, shuting down" and exits.
+    A named volume lives in the VM's own disk image, so etcd's fsync never
+    crosses the host boundary the index write is saturating.
+    """
+    rendered = milvus_runtime.compose_file(etcd_dir="volume:wikipedia-etcd")
+
+    assert "- wikipedia-etcd:/etcd" in rendered
+    # external, or Compose prefixes the project name and silently creates an
+    # empty volume beside the populated one -- which reads as "the collection
+    # is gone" and, left running, invites the GC to treat every binlog in
+    # object storage as an orphan.
+    assert "\nvolumes:\n  wikipedia-etcd:\n    external: true\n" in rendered
+    assert "- ./volumes/milvus:/var/lib/milvus" in rendered, "index must stay put"
+
+
+def test_compose_file_declares_no_volumes_section_for_a_bind_mount() -> None:
+    assert "\nvolumes:\n" not in milvus_runtime.compose_file(etcd_dir="/ssd/etcd")
+
+
+def test_ensure_milvus_does_not_make_a_directory_for_a_named_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = tmp_path / "bundle"
+    storage.mkdir()
+    monkeypatch.setattr(milvus_runtime, "ensure_compatible_storage", lambda *a, **k: None)
+    monkeypatch.setattr(milvus_runtime, "ensure_docker", lambda *a, **k: None)
+    monkeypatch.setattr(milvus_runtime, "mounted_storage", lambda *a, **k: None)
+    monkeypatch.setattr(milvus_runtime, "healthz_ok", lambda *a, **k: True)
+    monkeypatch.setattr(
+        milvus_runtime,
+        "docker",
+        lambda *args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    milvus_runtime.ensure_milvus(
+        "http://localhost:19530",
+        storage_dir=storage,
+        etcd_dir="volume:wikipedia-etcd",
+    )
+
+    written = (storage / milvus_runtime.COMPOSE_FILENAME).read_text(encoding="utf-8")
+    assert "- wikipedia-etcd:/etcd" in written
+    assert not (storage / "volume:wikipedia-etcd").exists(), (
+        "a volume name is not a path and must not be created as one"
+    )
+
+
 def test_ensure_milvus_renders_the_etcd_directory_it_was_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
