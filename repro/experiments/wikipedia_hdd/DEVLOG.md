@@ -767,10 +767,271 @@ Docker Desktop은 USB 외장 HDD로 가는 bind mount에 지속적인 랜덤 I/O
 
 | 안 | 대가 |
 |---|---|
-| 파일공유 구현을 gRPC FUSE로 교체 | Docker Desktop GUI 설정. 워치독이 virtiofs 전용인지 미확인 |
+| 파일공유 구현을 gRPC FUSE로 교체 | Docker Desktop GUI 설정. 워치독이 virtiofs 전용인지 미확인 → **채택함, 아래 참조** |
 | `beamWidthRatio` 축소로 동시 읽기 감소 | 검색이 더 느려짐 |
 | 인덱스를 내장 SSD로 | **처치 소멸** — 이 실험의 전제가 사라진다 |
 | 코퍼스 축소 | 워킹셋이 캐시에 들어가면 역시 처치 약화 |
+
+### 로컬 인덱스는 남길 수 없다 — 근거 두 지점 (2026-08-05)
+
+앞 절이 *"재시작은 로컬 인덱스 93 GB를 통째로 버린다"* 로 끝났고, 다음 질문은
+**"그럼 남겨 두면 안 되나"** 였다. 답은 아니오이고, 막히는 지점이 둘이다.
+
+| 지점 | 무엇 | 우회 |
+|---|---|---|
+| ① 기동 시 삭제 | `cmd/roles/roles.go` v2.5.27 `cleanLocalDir` → 조건 없는 `os.RemoveAll` (`{root}/indexnode`, `{root}/querynode`, mmap). **끄는 설정·환경변수 없음** | 가능 — 기동 전에 `mv`로 빼두면 삭제를 피한다 |
+| ② 로드 시 재수신 | `VectorDiskIndex::Load()`가 로컬 파일 존재 여부를 확인하지 않고 `CacheIndexToDisk()` 호출. 인덱스 prefix 디렉터리를 초기화 전에 지우기까지 한다 | 불가 — 되돌려놔도 안 읽고 MinIO에서 받아 덮어쓴다 |
+
+핵심은 파일이 남아 있느냐가 아니라 **Milvus가 읽어주느냐**다. Milvus에게 로컬 스토리지는
+저장소가 아니라 *자기가 소유한 캐시*이고 원본은 MinIO다. 크래시로 잘린 파일이 남아도
+판별할 체크섬이 없으므로 신뢰하지 않는 쪽을 택한 설계다 — bind mount로 바이트가
+보존돼도 소용없는 이유가 이것이다.
+
+앞 절의 *"잔여 파일이 있으면 세그먼트당 2분, 콜드면 7~9분"* 은 따라서 파일 재사용이 아니라
+**페이지 캐시**(직전에 읽은 MinIO 객체가 VM 램에 남아 있던 구간)로 설명해야 한다.
+
+#### ②를 실증하려다 ①을 확인했다
+
+②는 소스 판독이라 반증 비용이 거의 0인 헤지를 걸었다. 기동 전에 `data/indexnode`
+(85 GB, 202 세그먼트)를 같은 볼륨 안에서 `mv` — APFS 안의 rename이라 즉시 끝난다.
+기동 후 삭제 로그를 보고 되돌린 뒤 세그먼트당 로드 시간으로 판정할 계획이었다.
+
+**로그 매칭에서 실패했다.** `docker logs`는 컨테이너의 *전체 이력*을 갖고 있다.
+`grep "Clean local data cache"`가 1초 만에 맞은 것은 이번 기동이 아니라 같은 날 오전
+(01:14 / 01:52 UTC)의 줄이었다. 그래서 삭제가 일어나기 1분쯤 전에 되돌려 놓았고,
+Milvus는 복원된 85 GB를 그대로 지웠다(`data/indexnode` 소멸, 볼륨 523 → 435 GiB).
+
+- **얻은 것:** ①이 실측으로 확인됐다.
+- **잃은 것:** ②를 실증할 기회. 다시 재려면 로컬 사본을 만드는 로드가 또 필요하다.
+- **잃지 않은 것:** 그 85 GB는 어차피 같은 시점에 삭제될 운명이었다. 순수 손해는 0이다.
+
+> `docker logs`로 기동 이벤트를 기다릴 때는 `--since <이번 기동 시각>`을 반드시 붙인다.
+> 재시작이 반복되는 스택에서는 무조건 오탐한다.
+
+#### 부수 발견 — 로컬 루트가 기동마다 다르다
+
+08-05 22:51 로드는 인덱스 파일을 `data/querynode/`에, 08-06 02:28 로드는 `data/indexnode/`에
+썼다. standalone은 한 프로세스가 여러 role을 띄우므로 로컬 chunk manager의 루트가 어느
+role의 `initcore`가 먼저 잡느냐로 갈리는 것으로 보인다. **헤지가 애초에 성립하기 어려웠다는
+뜻이기도 하다** — `indexnode`에 복원해 둬도 그 로더는 `querynode`를 봤을 것이다.
+
+#### 고치려면 두 곳을 같이 고쳐야 한다
+
+①만 고치면 ②가 덮어쓰고, ②만 고치면 ①이 먼저 지운다. ②가 segcore(C++)라서 Milvus를
+소스에서 빌드해야 하고(Knowhere/DiskANN, arm64, conan), 공식 이미지 운용이 커스텀 이미지
+운용으로 바뀐다. 그리고 존재 검사만으로는 위험하다 — 잘린 파일을 조용히 로드하게 되므로
+MinIO 객체 크기와 대조해 정확히 일치할 때만 스킵해야 한다. 패치가 닿는 곳은 기동·로드
+경로뿐이고 **검색 경로는 그대로**라 지연 수치의 의미는 변하지 않지만, 재시작이 여러 번 더
+필요해질 때 착수할 일이지 지금 할 일은 아니다.
+
+### 정정 — 재시작 세금은 5시간이 아니라 3시간 12분이다 (2026-08-06)
+
+이 문서가 재시작 비용을 "약 5시간"으로 적어 왔는데, 그 값은 08-05 낮에 **중간에 죽은**
+로드의 세그먼트당 소요(콜드 7~9분)에서 외삽한 추정치였고 완주 기록이 아니었다.
+
+```
+setup: collection loaded in 11527.9 s     ← 3시간 12분, 처음으로 측정된 완주 로드
+       (08-05 22:51 → 08-06 02:03, VM 18 GB, taskExecutionCap 4,
+        searchCacheBudgetGBRatio 0.10, 파일공유 virtiofs)
+```
+
+진행률은 초반 2.2분/%p에서 중반 1.4분/%p까지 빨라졌다가 후반에 다시 2분/%p로 돌아왔다.
+세금은 여전히 크지만, 5시간으로 적어 두면 재시작 판단이 실제보다 보수적으로 기운다.
+
+### 장애 — 파일공유 구현 두 가지가 각각 반대편에서 깨진다 (2026-08-06)
+
+로드를 완주하고 **첫 non-hit 검색(329.9 s)을 마친 뒤 7분 만에** Docker Desktop이 죽었다.
+7번째다. 이번엔 로그가 원인을 명시한다.
+
+```
+[2026-08-05T17:18:34Z] engine linux/virtualization-framework run error:
+                       service fs failed: injecting event blocked for 60s
+```
+
+17:18 UTC = 02:18 KST. 호스트 여유 16.6 GB, `RssAnon` 4.9 GB(천장 ~17 GB), 고아 VM 0개 —
+메모리도 Milvus도 아니고 **파일공유 계층**이다. 로드(순차 읽기+쓰기)는 3시간을 버티는데
+검색(랜덤 읽기 IOPS 상한)은 10~15분 만에 60초 문턱을 넘긴다. 이 속도면 검색 25회에
+uptime 10회 ≈ 32시간이 든다. **동일 재시도는 죽은 원인이 우발적이라는 가정인데, 그 가정이
+틀렸다.** 그래서 워치독이 지목한 `service fs` 자체를 바꿨다.
+
+#### 교체 — 키가 두 개다, 하나만 바꾸면 조용히 무시된다
+
+`~/Library/Group Containers/group.com.docker/settings-store.json`:
+
+| 키 | 값 | |
+|---|---|---|
+| `FilesharingMode` | `"grpcfuse"` | 이것만 바꾸면 **안 바뀐다** |
+| `UseVirtualizationFrameworkVirtioFS` | `false` | Virtualization.framework 백엔드에서 이쪽이 우선한다 |
+
+첫 번째만 넣고 재기동했을 때 `starting grpcfuse fileserver`와
+`grpcfuseClient.VolumeApprove(...)`가 로그에 찍혀 적용된 것처럼 보였지만, 실제 마운트는
+그대로 virtiofs였다. **로그가 아니라 마운트 체인을 봐야 한다:**
+
+```bash
+docker run --rm -v /Volumes/agentic_rag:/m alpine sh -c "grep ' /m ' /proc/self/mountinfo"
+
+# 전: - fakeowner /run/host_mark/Volumes …  → virtiofs.virtiofs1
+# 후: - fuse.grpcfuse grpcfuse rw,user_id=0,group_id=0,allow_other,max_read=1048576
+```
+
+키 이름은 추측하지 않고 앱 번들에서 확인했다 —
+`strings /Applications/Docker.app/Contents/MacOS/com.docker.backend | grep -i filesharing`
+가 `FilesharingMode`(`engine.Settings`의 필드)와 허용값 `virtiofs|grpcfuse|osxfs`를 준다.
+**틀린 키는 오류 없이 무시되므로, 검증 없이 진행하면 로드 몇 시간을 그대로 버린다.**
+
+#### 2차 장애 — 워치독은 피했고, 이번엔 etcd가 굶었다
+
+교체 후 재시도는 워치독 오류 0건으로 로드를 4시간 27분간 끌고 갔다(83%). 그리고 죽었다.
+이번엔 엔진이 아니라 **Milvus 내부 role들이 스스로 종료**했다.
+
+```
+etcd   : "waiting for ReadIndex response took too long, retrying"   (수십 회)
+         "Ignore the lease revoking request because current member isn't a leader"
+milvus : "fail to retry keepAliveOnce" … "connection lost detected, shuting down"
+         "Index Node disconnected from etcd, process will exit"
+```
+
+단일 멤버 etcd가 자기 자신과의 정족수를 잃었다 — 자기 디스크가 멎었다는 뜻이다. 그리고
+etcd의 데이터 디렉터리는 `/Users/…/etcd_ssd`, 즉 **호스트 바인드 마운트**였다.
+
+| 구성 | 죽는 구간 | 기전 |
+|---|---|---|
+| virtiofs | **검색** · 10~15분 | `/Volumes` 랜덤 읽기가 fs 서비스를 60초 블로킹 → 워치독이 엔진 종료 |
+| grpcfuse | **로드** · 4시간 27분 | 호스트 파일서버 하나로 모든 공유가 직렬화 → 87 GB 인덱스 쓰기 뒤에 etcd fsync가 밀림 → 리스 상실 → 전 role 자살 |
+
+virtiofs는 `/Users`와 `/Volumes`에 각각 별도 디바이스(virtiofs0/virtiofs1)를 줘서 etcd가
+인덱스 쓰기와 큐를 공유하지 않았다. grpcfuse는 하나로 합친다.
+
+> **공통 급소는 etcd가 호스트 파일공유 위에 있다는 것이다.** 앞에서 etcd를 HDD → 내장 SSD로
+> 옮긴 적이 있는데, 그것도 같은 종류의 사고였다. **매체를 바꾼 것이지 경로를 뺀 것이 아니어서**
+> 재발했다.
+
+#### 조치 — etcd를 Docker named volume으로
+
+named volume은 VM 자체 디스크 이미지 안에 있으므로 **파일공유 경로를 아예 타지 않는다.**
+etcd 데이터는 139 MB이고, 인덱스는 HDD에 그대로 두므로 처치는 보존된다.
+`milvus_runtime.compose_file()`이 `etcd_dir="volume:<name>"`을 받도록 고쳤다.
+
+**여기서 한 번 크게 미끄러졌다.** `volumes:`에 이름만 선언하면 Compose가
+`<project>_<name>`으로 네임스페이스를 붙여 **빈 볼륨을 새로 만든다.** 그 위에서 뜬 Milvus는
+카탈로그가 비어 `list_collections()`가 `[]`를 돌려주고, 객체 스토리지의 174 GB 바이너리
+로그는 전부 *고아*가 된다 — GC가 지워도 되는 상태다. 즉시 스택을 내렸고, 확인 결과 GC는
+스캔을 한 번도 돌지 않았다(`interval=1h` 시작 70초 뒤 종료, 삭제 로그 0건, 최근 90분 내
+변경 디렉터리 0건). `missingTolerance=24h` · `dropTolerance=3h`도 방벽이었다.
+
+```yaml
+volumes:
+  wikipedia-milvus-etcd-data:
+    external: true        # Compose가 이름을 건드리지 못하게 한다
+```
+
+```
+# 복구 확인
+collections: ['wikipedia_2024_06_bge_m3_en_v1']
+row_count: 10,000,000   index: DISKANN   indexed_rows: 10,000,000 / 10,000,000
+etcd mount: volume wikipedia-milvus-etcd-data -> /etcd
+```
+
+볼륨은 **미리 만들고 데이터를 채운 뒤** 스택을 올려야 한다:
+
+```bash
+docker volume create wikipedia-milvus-etcd-data
+docker run --rm -v wikipedia-milvus-etcd-data:/dst \
+  -v /Users/imdonghyeon/.cache/wikipedia_diskann/etcd_ssd:/src:ro \
+  alpine sh -c "cp -a /src/. /dst/"
+```
+
+> **부수 함정:** etcd 리스를 잃은 Milvus 컨테이너는 `docker stop`·`docker kill`에
+> `tried to kill container, but did not receive an exit event`로 응답하지 않는다.
+> Docker Desktop 재기동 외에 푸는 방법을 찾지 못했다.
+
+#### grpcfuse의 대가
+
+로드 처리량이 초반 0.52 GB/분에서 후반 0.26 GB/분까지 떨어졌고, 전체로는 virtiofs의
+3시간 12분 대비 **약 1.5배**다. 워치독을 피하는 값이 그만큼이며, **검색 지연에도 같은
+방향의 영향을 가정해야 한다.** 이 구성에서 나오는 수치는 virtiofs 구성의 값(1차 시도의
+non-hit 329.9 s 포함)과 직접 비교할 수 없다.
+
+### 결과 — 10M hit / non-hit 지연 (2026-08-06)
+
+`uv run run-experiment` → `vectordb`. 5 질의(FanOutQA dev, 고정 시드) × 2 라운드, top_k=5.
+에이전트(llama.cpp)는 돌리지 않았다. 검색 횟수는 `2·N·R + N` = 25회이며, 기본값
+(20 × 10 = 420회)은 검색 1회가 5분대인 이 컬렉션에서 32시간이 든다.
+
+<!-- TODO: 3차 시도 결과 -->
+
+| | 값 |
+|---|---|
+| 컬렉션 로드 (콜드, HDD에서) | TODO |
+| non-hit (라운드마다 페이지 캐시 드롭) | TODO |
+| hit (워밍업 후) | TODO |
+
+**수치와 함께 읽어야 할 단서 셋:**
+
+1. **hit ≈ non-hit이면 그건 고장이 아니라 결과다.** 로컬 인덱스 93 GB가 VM 18 GB를 압도해
+   08-05 측정에서 이미 웜/콜드 절벽이 없었다(10회차 272 s가 2회차 297 s보다 빠르지 않았다).
+   이번 표는 그 관찰을 두 target으로 갈라 정량화한 것이다.
+2. **non-hit은 process-fresh가 아니다.** `reset_vector_cache`가 비우는 것은 Docker VM의
+   페이지 캐시이고, Milvus 자신의 노드 캐시(`searchCacheBudgetGBRatio 0.10`)와
+   **macOS 호스트의 UBC는 그대로 남는다.** `render_report`가 앞의 두 가지는 찍지만
+   맥 호스트 캐시 건은 출력에 없다.
+3. **이전 수치와 비교 불가.** 캐시 비율 0.01 → 0.10, VM 22 → 18 GB, 파일공유
+   virtiofs → grpcfuse. 콜드 386 s / 중앙값 295 s는 다른 구성에서 나온 값이다.
+
+### 다음에 할 것 — 재개 지점 (2026-08-06 09:30 중단)
+
+3차 시도를 로드 24%에서 **의도적으로 중단**했다(장애가 아니다). 아래는 그대로 이어서
+시작하기 위한 상태와 순서다.
+
+#### 이미 되어 있는 것
+
+| 항목 | 상태 |
+|---|---|
+| etcd | Docker named volume `wikipedia-milvus-etcd-data`(`external: true`), 139 MB 이관·검증 완료 |
+| 파일공유 | grpcfuse (`FilesharingMode=grpcfuse` + `UseVirtualizationFrameworkVirtioFS=false`), 마운트 체인으로 검증 |
+| 매니페스트 | `milvus.etcd_dir = "volume:wikipedia-milvus-etcd-data"` |
+| 컬렉션 | 10,000,000행 · DISKANN · `indexed_rows == total_rows` — 무사 |
+| Docker VM | 18,432 MiB |
+| 스택 | 정지 상태. 로컬 인덱스 21 GB는 다음 기동 때 삭제된다(정상) |
+
+#### 실행
+
+```bash
+cd /Users/imdonghyeon/agentic_rag
+printf 'vectordb\n5\n2\n' | nohup caffeinate -ims uv run run-experiment \
+  > wikipedia_diskann_hitmiss_$(date +%m%d_%H%M).log 2>&1 &
+```
+
+로드 ~5시간(grpcfuse 실측 페이스) + 측정 ~2시간. 메뉴 선택은 번호가 아니라 이름
+(`vectordb`)으로 넣는다 — 항목 순서가 바뀌어도 에이전트 실험이 걸리지 않는다.
+
+#### 아직 검증되지 않은 가정 두 개
+
+다음 시도가 실제로 판정하는 것은 이 둘이고, **아직 어느 쪽도 확인된 바 없다.**
+
+1. **etcd named volume이 로드 구간의 리스 상실을 막는가.** 2차 실패 이후에 적용했고,
+   그 뒤로 로드를 완주시켜 본 적이 없다.
+2. **grpcfuse가 검색 구간의 워치독을 막는가.** 1차는 virtiofs에서 검색 중 죽었고,
+   2차는 로드에서 죽어 검색까지 가지 못했다. **검색 구간을 통과한 grpcfuse 실행은 아직 없다.**
+
+#### 그래도 죽으면 (순서대로)
+
+| 죽는 구간 | 다음 수 |
+|---|---|
+| 검색 | ① 측정을 3×1(검색 9회, ~50분)로 축소해 노출 시간 단축 → ② `beamWidthRatio` 축소로 동시 읽기 감소(검색이 더 느려지고, 그 자체가 측정값이 됨) → ③ Milvus 패치 |
+| 로드 | 원인부터 다시 특정한다. etcd 로그(`isn't a leader`) · Docker 백엔드 로그(`injecting event blocked`) · `RssAnon` 셋을 각각 본다 — 세 번의 실패가 모두 다른 원인이었다 |
+
+#### 운영 메모
+
+- **스택을 내릴 때는 `release_collection`을 먼저 부른다.** 로드 중에 그냥 `compose stop`
+  하면 컨테이너가 `tried to kill container, but did not receive an exit event`로 응답
+  불능이 되고, Docker Desktop 재기동 외에 푸는 방법을 찾지 못했다. 릴리스 후에는
+  깨끗하게 내려갔다.
+- 백업: `manifest.json.bak-before-etcd-volume`,
+  `settings-store.json.bak-before-grpcfuse`, `.bak-before-18g`.
+  구 etcd 데이터(`~/.cache/wikipedia_diskann/etcd_ssd`, 139 MB)는 폴백용으로 남겨 뒀다.
+- 로그: `wikipedia_diskann_hitmiss_0805_2252.log`(1차, virtiofs, 검색 1회 후 사망),
+  `_0806_0227.log`(2차, grpcfuse, 로드 83%에서 etcd 사망), `_0806_0904.log`(3차, 24%에서 중단).
 
 ### 부분집합으로 먼저 가는 이유
 

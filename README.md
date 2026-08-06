@@ -463,14 +463,39 @@ sets five values to get past it; the diagnosis is in
 **Do not restart Milvus with a large collection loaded.** Milvus empties its
 local storage at startup, so the DiskANN index is re-fetched from MinIO — which
 is on the same disk. A loaded 10M collection had 93 GB under
-`volumes/milvus/data` and 6.2 GB seconds after a restart; refilling it took
-about five hours, with per-segment load going from ~2 min (files already local)
-to 7–9 min (cold). Batch anything that recreates the container, and use etcd for
-settings that are refreshable:
+`volumes/milvus/data` and 6.2 GB seconds after a restart. A full reload was
+measured at **3 h 12 min** (11,527.9 s, 10M rows, virtiofs); over gRPC FUSE the
+same reload runs about 1.5× longer. Batch anything that recreates the container,
+and use etcd for settings that are refreshable:
 
 ```bash
 docker exec wikipedia-milvus-etcd \
   etcdctl put "by-dev/config/queryCoord.taskExecutionCap" "16"
+```
+
+**Leaving the index on disk does not help**, and it is worth knowing why before
+spending time on it. Two independent gates: `cleanLocalDir` in `cmd/roles/roles.go`
+`os.RemoveAll`s the local directories at every startup with no setting to disable
+it, and `VectorDiskIndex::Load()` re-fetches every file without checking whether
+it is already present. Milvus treats local storage as a cache it owns; object
+storage is the only source of truth.
+
+**Keep etcd off host file sharing.** Both macOS implementations starve it once
+the index load saturates them — virtiofs blocks its own service, gRPC FUSE
+funnels every share through one host fileserver — and a starved etcd misses its
+lease, after which every Milvus role logs `connection lost detected, shuting down`
+and exits mid-load. Moving etcd from the HDD to the internal SSD does not fix
+this: the medium changed, the path did not. Use a Docker named volume, which
+lives in the VM's own disk image. Create and populate it *before* the stack
+starts, and declare it `external` — otherwise Compose namespaces it as
+`<project>_<name>`, creates an empty one, and Milvus comes up on an empty
+catalog where every binlog in object storage is an orphan:
+
+```bash
+docker volume create wikipedia-milvus-etcd-data
+docker run --rm -v wikipedia-milvus-etcd-data:/dst -v /path/to/etcd:/src:ro \
+  alpine sh -c "cp -a /src/. /dst/"
+# then record it in the manifest as milvus.etcd_dir = "volume:wikipedia-milvus-etcd-data"
 ```
 
 **Size the Docker VM for the search step, not the load step.** Loading only
