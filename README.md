@@ -1,6 +1,6 @@
 # agentic-rag — decode-RAG의 검색 지연을 "저장매체"라는 독립변수로 통제해 재현 가능하게 측정하는 연구
 
-KAIST **"The Cost of Dynamic Reasoning: Demystifying AI Agents and Test-Time Scaling from an AI Infrastructure Perspective"** (arXiv [2506.04301v2](https://arxiv.org/abs/2506.04301), HPCA-2026)의 HotpotQA 실험을 로컬 Apple Silicon에서 재현하고, 그 위에서 검색 백엔드를 **Live Wikipedia API → Cohere 벡터DB(+rerank) → 외장 USB HDD 위 Milvus DiskANN**까지 단계적으로 바꿔가며 "에이전트가 검색을 기다리며 노는 시간(retrieval-time fraction)을 decode 뒤로 얼마나 숨길 수 있는가"(decode-RAG speculative prefetch)를 정량화하는 대학원 연구 저장소입니다.
+KAIST **"The Cost of Dynamic Reasoning: Demystifying AI Agents and Test-Time Scaling from an AI Infrastructure Perspective"** (arXiv [2506.04301v2](https://arxiv.org/abs/2506.04301), HPCA-2026)의 HotpotQA 실험을 로컬 Apple Silicon에서 재현하고, 그 위에서 검색 백엔드를 **Live Wikipedia API → Cohere 벡터DB(+rerank) → 외장 USB HDD 위 Milvus DiskANN**까지 단계적으로 바꿔가며 "에이전트가 검색을 기다리며 노는 시간(retrieval-time fraction)을 decode 뒤로 얼마나 숨길 수 있는가"(decode-RAG speculative prefetch)를 정량화하는 **학부 졸업 프로젝트**입니다. **아직 진행 중인 연구**입니다.
 
 > *A from-scratch local reproduction of a HPCA-2026 AI-infrastructure paper, extended into an original decode-RAG speculative-prefetch study where the retrieval backend's storage medium — network API, SSD-backed vector DB, external HDD with a DiskANN index — is treated as a controlled experimental variable, not an implementation detail.*
 
@@ -13,6 +13,7 @@ KAIST **"The Cost of Dynamic Reasoning: Demystifying AI Agents and Test-Time Sca
 [![PyTorch](https://img.shields.io/badge/PyTorch-torch%20%2F%20transformers-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![uv](https://img.shields.io/badge/uv-workspace-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
 [![tests](https://img.shields.io/badge/unit%20tests-273%20passed-brightgreen?style=flat-square)](#7-getting-started)
+[![Status](https://img.shields.io/badge/Status-In%20Progress-yellow?style=flat-square)](#9-실험-연구-정리-experiment-branch-audit)
 
 **목차**: [1. Overview](#1-overview--배경--동기) · [2. Demo](#2-demo) · [3. Architecture](#3-architecture) · [4. My Role](#4-my-role) · [5. Key Results](#5-key-results) · [6. Tech Stack Rationale](#6-tech-stack-rationale) · [7. Getting Started](#7-getting-started) · [8. Links](#8-links) · [9. 실험 연구 정리](#9-실험-연구-정리-experiment-branch-audit)
 
@@ -106,12 +107,12 @@ agentic_rag/
 
 ## 4. My Role
 
-이 저장소는 **1인 대학원 연구 프로젝트**입니다. 전체 97개 커밋 중 84개(약 87%)가 본인(임동현)의 작업이며, 나머지 13개는 랩 동료 **Cheolwan Park**이 기여했습니다.
+이 저장소는 **학부 졸업 프로젝트(2인 팀)**이며, **아직 진행 중**입니다. 팀원은 함께 졸업 프로젝트를 진행하는 **Cheolwan Park**으로, 하드웨어 쪽에 강해 실험 설계 상당 부분을 주도했습니다. 전체 97개 커밋 중 84개(약 87%)가 본인(임동현)의 작업이며, 나머지 13개는 Cheolwan Park이 기여했습니다 — 다만 커밋 수는 코드 구현 비중만 반영할 뿐, 실험을 어떻게 설계할지에 대한 논의와 의사결정은 함께 이뤄졌습니다.
 
 - **본인이 직접 수행한 것**: 논문 재현 설계·실행(HotpotQA, 4종 에이전트, Fig4/6/7/8/13 검증), Cohere 벡터DB baseline 구축과 rerank 도입 의사결정, **외장 HDD 위 Milvus DiskANN 트랙 전체**(Qdrant HNSW 47M 적재 → 48분 검색 실패 진단 → DiskANN 피벗 → 10M 컬렉션 로드/etcd/Docker 파일공유 인프라 디버깅, 30개 커밋), decode-RAG speculative prefetch 메커니즘 구현과 정확성 불변 검증, 전체 분석·플롯·리포트 작성, 그리고 이번 포트폴리오 정리(README/아키텍처 다이어그램/실험 브랜치 감사).
-- **Cheolwan Park이 기여한 것**: Wikipedia 벡터DB workspace의 초기 골격(다운로드·적재 파이프라인 통합, Qdrant 병렬 적재), `experiment/` 로컬 측정 스위트(FanOutQA 트레이스, parallel/tooluse/prefetched-toolcall 실험 5종)의 최초 구현, 그리고 아직 미병합 상태인 `agent/scheduling/` 네이티브 듀얼모델 코스케줄러(§9 참고).
+- **Cheolwan Park이 기여한 것**: 하드웨어/인프라 관점에서 실험 설계를 주도(측정 방법론, 코스케줄링 실험 방향 등), Wikipedia 벡터DB workspace의 초기 골격(다운로드·적재 파이프라인 통합, Qdrant 병렬 적재), `experiment/` 로컬 측정 스위트(FanOutQA 트레이스, parallel/tooluse/prefetched-toolcall 실험 5종)의 최초 구현, 그리고 아직 미병합 상태인 `agent/scheduling/` 네이티브 듀얼모델 코스케줄러(§9 참고).
 
-즉 벡터DB 적재·측정 하네스의 **토대**는 공동 작업이었고, 그 위에서 진행된 **저장매체 실험(HDD/DiskANN)과 decode-RAG prefetch 연구, 논문 재현 전체**는 본인이 단독으로 설계·실행했습니다.
+즉 벡터DB 적재·측정 하네스의 **토대**와 **실험 설계**는 공동 작업이었고(특히 하드웨어/코스케줄링 관련 설계는 Cheolwan Park이 주도), 그 위에서 진행된 **저장매체 실험(HDD/DiskANN) 구현과 decode-RAG prefetch 연구, 논문 재현 실행**은 본인이 설계·실행했습니다. 프로젝트는 계속 진행 중이며, 위 실험/구현 범위는 현재까지의 스냅샷입니다.
 
 ---
 
