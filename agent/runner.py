@@ -226,9 +226,13 @@ class LlamaCppClient:
         *,
         cancel_event: threading.Event | None = None,
         stop_after_complete_tool_call: bool = False,
+        on_request_start: Callable[[int], None] | None = None,
+        on_chunk: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         before = self.metrics()
         request_start = self.clock_ns()
+        if on_request_start is not None:
+            on_request_start(request_start)
         chunks: list[dict[str, Any]] = []
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
@@ -291,6 +295,8 @@ class LlamaCppClient:
                         }
                     )
                     previous_ns = received
+                    if on_chunk is not None:
+                        on_chunk(chunks[-1])
                     if channel == "reasoning":
                         reasoning_parts.append(text)
                     else:
@@ -337,6 +343,8 @@ class LlamaCppClient:
                             }
                         )
                         previous_ns = received
+                        if on_chunk is not None:
+                            on_chunk(chunks[-1])
                 value = choice.get("finish_reason")
                 if isinstance(value, str):
                     finish_reason = value

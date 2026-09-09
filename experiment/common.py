@@ -389,7 +389,9 @@ def llama_server_binary() -> tuple[str, dict[str, Any]]:
         [binary, "--version"], capture_output=True, text=True, check=False
     )
     output = (result.stdout + result.stderr).strip()
-    match = re.search(r"version:\s*(\d+)", output)
+    match = re.search(r"\bbuild\s+(\d+)", output) or re.search(
+        r"version:\s*(\d+)(?=\s|$)", output
+    )
     if result.returncode != 0 or match is None:
         raise ExperimentError(
             f"could not determine llama.cpp build from `{binary} --version`"

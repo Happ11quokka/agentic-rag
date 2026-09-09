@@ -35,3 +35,6 @@ pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 include = ["agent*", "experiment*", "fanoutqa*"]
+
+[tool.setuptools.package-data]
+experiment = ["resources/*.tracetemplate"]

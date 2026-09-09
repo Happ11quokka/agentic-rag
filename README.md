@@ -361,9 +361,49 @@ include every search query and the exact truncated result snippets returned to t
 model. Warmup calls and llama-server logs are intentionally excluded. Interrupted or
 failed runs retain completed JSONL rows and record the failure in `manifest.json`.
 
+`contention-measure` saves `counters-NNNN/<condition>/` for each fixed-duration
+capture, with `recording.trace`, recorder/export logs, `recorder-status.json`,
+`toc.xml`, compressed normalized `samples.jsonl.gz`, and a counter summary.
+Its run summary includes each unit's measurements. Both model servers are killed
+at the capture deadline, before waiting for trace finalization and export. Partial
+streams are retained; deadline cancellation is expected. TTFT and stream chunk
+rates describe the observed window, not a completed response. Chunk rates are not
+tokenizer token rates.
+
+Counter sample times are aligned with client timestamps; uncertain boundary samples
+are excluded. The before-first-chunk interval includes queueing and prefill, and
+first-to-last chunk intervals approximate decode. Simultaneous decode overlap and
+the remaining tail are reported separately when present.
+
+These counters are GPU-wide, including other applications; a model-named window
+does not attribute bandwidth to that model. GPU memory traffic can include
+system-level cache traffic and is not raw DRAM bandwidth. Counter means are weighted
+by sampled duration; coverage reports the sampled share of each window. Low coverage
+is visible rather than treated as zero activity. Negative/nonfinite samples and
+nonpositive durations are flagged in the normalized data and excluded from means;
+counter summaries retain their counts. Timings include profiling overhead,
+and highest limiter values are evidence for interpretation, not an automatic
+memory/compute verdict. Unavailable overlap windows remain explicit. A failed export
+retains completed inference records and marks the run failed.
+
 - `parallel` starts the selected target and draft servers together, sends paired
   identical FanOutQA prompts, and reports TTFT plus per-model and combined decode
   throughput.
+- `contention-measure` compares main-only, draft-only, and simultaneous inference
+  using the same prompts and generation settings as `parallel`. Each condition
+  starts a fresh pair of model servers, warms both, records for a fixed duration,
+  and kills both servers before processing the trace. Condition order rotates
+  across question/repetition units. Reports compare TTFT and stream chunk rates
+  alongside GPU memory read/write bandwidth, ALU utilization, and ranked limiters.
+  Select it through `uv run run-experiment`; no separate profiler terminal or
+  user-created template is needed. Defaults: one question, one repetition, and
+  **2 seconds per condition**. The duration prompt accepts 1–5 seconds to bound
+  trace size. Setup and export take additional time.
+  Full Xcode and supported Apple silicon GPU counters are required; the bundled
+  profile targets M3 with Xcode 26.6. Each condition's export must contain the
+  required counters before the experiment proceeds. Profiling requires at least
+  8 GiB free for temporary files. Recorder failures include exit codes/signals;
+  completed partial streams remain available if finalization or export fails.
 - `parallel-scheduled` loads both GGUF models into one native process with separate
   llama contexts, Q8 KV caches, and samplers. It prefills draft then main and gives
   each active model a non-preemptible 200 ms decode slice in draft/main round-robin

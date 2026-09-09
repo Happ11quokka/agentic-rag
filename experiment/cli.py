@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from . import (
+    contention_measure,
     independent_run,
     parallel,
     parallel_scheduled,
@@ -60,6 +61,11 @@ EXPERIMENTS = (
         "Qdrant cache hit and non-hit latency",
         vectordb.prompt_and_run,
         model_selection="none",
+    ),
+    Experiment(
+        "contention-measure",
+        "resident solo/parallel inference with Metal GPU counters",
+        contention_measure.prompt_and_run,
     ),
 )
 
